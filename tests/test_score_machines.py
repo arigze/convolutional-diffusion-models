@@ -1,6 +1,6 @@
 import torch
 
-from score_machines import IdealScoreMachine, LocalScoreMachine
+from score_machines import IdealScoreMachine, LocalScoreMachine, EquivariantLocalScoreMachine
 
 # Test the IdealScoreMachine implementation
 # Test parameters
@@ -46,3 +46,26 @@ print("Local Score shape:", score.shape) # Should be [batch_size, channels, heig
 x = torch.randn(*image_size)  # Random initial noise
 sampled_x = local_score_machine.sample(x)
 print("Local Sampled x shape:", sampled_x.shape) # Should be [channels, height, width]
+
+
+# Test the EquivariantLocalScoreMachine implementation
+# Test parameters
+noise_schedule = lambda t: torch.linspace(0.01, 0.1, t)  # Simple linear noise schedule
+dataset = torch.randn(100, 3, 32, 32)  # Dummy dataset of 100 images
+batch_size = 10
+image_size = (3, 32, 32)
+timesteps = 5
+
+# Initialize the EquivariantLocalScoreMachine
+equivariant_score_machine = EquivariantLocalScoreMachine(noise_schedule, dataset, batch_size, timesteps)
+
+# Test forward pass
+x = torch.randn(batch_size, *image_size)  # Random input batch
+t = 2  # Time step to test
+score = equivariant_score_machine.forward(x, t)
+print("Equivariant Local Score shape:", score.shape) # Should be [batch_size, channels, height, width]
+
+# Test sampling
+x = torch.randn(*image_size)  # Random initial noise
+sampled_x = equivariant_score_machine.sample(x)
+print("Equivariant Local Sampled x shape:", sampled_x.shape) # Should be [channels, height, width]
