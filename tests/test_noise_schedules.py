@@ -19,4 +19,4 @@ print(betas) # Should be values between 0 and 0.999
 # Test exponential noise schedule
 betas = exponential_noise_schedule(10)
 print(betas.shape) # Should be [10]
-print(betas) # Should be exponentially spaced between exp(0.0001) and exp(0.02)
+print(betas) # Should be exponentially spaced between 0.0001 and 0.02

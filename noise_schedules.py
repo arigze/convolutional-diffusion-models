@@ -1,4 +1,5 @@
 import torch
+import math
 
 def linear_noise_schedule(timesteps, beta_start=0.0001, beta_end=0.02):
     # Returns list of betas
@@ -14,5 +15,5 @@ def cosine_noise_schedule(timesteps, s=0.008):
     return torch.clip(betas, 0, 0.999)
 
 def exponential_noise_schedule(timesteps, beta_start=0.0001, beta_end=0.02):
-    # Returns list ofbetas
-    return torch.exp(torch.linspace(beta_start, beta_end, timesteps))
+    # Returns list of betas
+    return torch.exp(torch.linspace(math.log(beta_start), math.log(beta_end), timesteps))
