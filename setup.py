@@ -11,7 +11,7 @@ setup(
     long_description_content_type="text/markdown",
     author="",
     packages=find_packages(),
-    py_modules=["models", "noise_schedules"],
+    py_modules=["models", "noise_schedules", "score_machines"],
     include_package_data=True,
     install_requires=["numpy"],
     python_requires=">=3.8",
