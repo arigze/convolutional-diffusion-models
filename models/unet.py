@@ -101,7 +101,7 @@ class ResidualUBlock(nn.Module):
             kernel_size=3,
             padding_mode=padding,
         )
-        self.activation = nn.ReLU()
+        self.activation = nn.SiLU()
         self.skip = None
         if residual and in_channels != out_channels:
             self.skip = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=True)
