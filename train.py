@@ -52,6 +52,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="DataLoader workers. Keep 0 for max debuggability/determinism.",
     )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Optional path to a checkpoint to resume from",
+    )
     return parser.parse_args()
 
 
@@ -127,6 +133,41 @@ def summarize_config(cfg: FullConfig) -> dict:
             "seeds_dir": cfg.artifacts.seeds_dir,
         },
     }
+
+
+def load_checkpoint_for_resume(
+    *,
+    path: str | Path,
+    device: torch.device,
+    backbone: torch.nn.Module,
+    diffusion: DDIMDiffusion,
+    optimizer: Adam,
+    scheduler: ExponentialLR,
+) -> tuple[int, int, float]:
+    ckpt = torch.load(path, map_location=device)
+
+    required_keys = [
+        "epoch",
+        "global_step",
+        "backbone_state_dict",
+        "diffusion_state_dict",
+        "optimizer_state_dict",
+        "scheduler_state_dict",
+    ]
+    missing = [k for k in required_keys if k not in ckpt]
+    if missing:
+        raise KeyError(f"Resume checkpoint is missing required keys: {missing}")
+
+    backbone.load_state_dict(ckpt["backbone_state_dict"])
+    diffusion.load_state_dict(ckpt["diffusion_state_dict"])
+    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+
+    last_epoch = int(ckpt["epoch"])
+    global_step = int(ckpt["global_step"])
+    last_loss = float(ckpt.get("last_loss", float("nan")))
+
+    return last_epoch, global_step, last_loss
 
 
 def set_global_seed(seed: int) -> None:
@@ -434,8 +475,43 @@ def main() -> None:
     diffusion.train()
     global_step = 0
     last_loss = float("nan")
+    start_epoch = 1
 
-    for epoch in range(1, cfg.training.epochs + 1):
+    if args.resume is not None:
+        resume_path = Path(args.resume)
+        if not resume_path.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+
+        resumed_epoch, global_step, last_loss = load_checkpoint_for_resume(
+            path=resume_path,
+            device=device,
+            backbone=backbone,
+            diffusion=diffusion,
+            optimizer=optimizer,
+            scheduler=scheduler,
+        )
+        start_epoch = resumed_epoch + 1
+
+        print()
+        print("=" * 80)
+        print("RESUMED TRAINING")
+        print("=" * 80)
+        print(f"Checkpoint path        : {resume_path}")
+        print(f"Resumed from epoch     : {resumed_epoch}")
+        print(f"Next epoch to run      : {start_epoch}")
+        print(f"Resumed global_step    : {global_step}")
+        print(f"Resumed last_loss      : {last_loss:.6f}")
+        print(f"Resumed scheduler lr   : {scheduler.get_last_lr()[0]:.8e}")
+        print()
+
+    if start_epoch > cfg.training.epochs:
+        print(
+            f"Checkpoint already reached/passed configured training length "
+            f"(start_epoch={start_epoch}, total_epochs={cfg.training.epochs})."
+        )
+        return
+
+    for epoch in range(start_epoch, cfg.training.epochs + 1):
         epoch_loss_sum = 0.0
         epoch_items = 0
 
