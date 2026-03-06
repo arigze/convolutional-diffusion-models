@@ -169,7 +169,7 @@ class MinimalResNet(nn.Module):
             padding_mode=padding,
         )
 
-        self.activation = nn.SiLU()
+        self.activation = nn.ReLU()
 
     @classmethod
     def from_config(cls, cfg: FullConfig) -> "MinimalResNet":
