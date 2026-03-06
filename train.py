@@ -223,11 +223,6 @@ def build_mnist_dataloader(
         )
     if cfg.dataset.conditional:
         raise ValueError("Step 5 trainer expects unconditional MNIST.")
-    if cfg.model.architecture != "resnet":
-        raise ValueError(
-            f"Step 5 trainer is intentionally restricted to ResNet first. "
-            f"Got architecture={cfg.model.architecture!r}."
-        )
     if cfg.dataset.channels != 1:
         raise ValueError(f"MNIST should have 1 channel, got {cfg.dataset.channels}")
     if cfg.dataset.image_size != 28:
