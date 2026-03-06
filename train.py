@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
 import argparse
 import json
 import random
@@ -19,8 +22,8 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 from config import FullConfig, compute_per_step_gamma, load_config
-from ddim import DDIMDiffusion
-from resnet import MinimalResNet
+from models.ddim import DDIMDiffusion
+from models.resnet import MinimalResNet
 
 
 DATASET_SIZES = {
