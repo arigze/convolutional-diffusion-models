@@ -16,7 +16,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from torch import amp
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ExponentialLR
 from torch.utils.data import DataLoader
@@ -251,8 +250,6 @@ def build_mnist_dataloader(
         shuffle=True,
         num_workers=num_workers,
         pin_memory=(cfg.experiment.device == "cuda"),
-        persistent_workers=(num_workers > 0),
-        prefetch_factor=2 if num_workers > 0 else None,
         drop_last=False,
         generator=generator,
     )
@@ -283,7 +280,6 @@ def build_optimizer(cfg: FullConfig, model: torch.nn.Module) -> Adam:
         betas=cfg.training.optimizer.betas,
         eps=cfg.training.optimizer.eps,
         weight_decay=cfg.training.optimizer.weight_decay,
-        fused=True,
     )
 
 
@@ -425,10 +421,6 @@ def main() -> None:
     optimizer = build_optimizer(cfg, diffusion)
     scheduler = build_scheduler(cfg, optimizer)
 
-    use_amp = (device.type == "cuda")
-    amp_dtype = torch.float16
-    scaler = amp.GradScaler("cuda", enabled=use_amp)
-
     dataset_size = DATASET_SIZES[cfg.dataset.name]
     steps_per_epoch = (dataset_size + cfg.training.batch_size - 1) // cfg.training.batch_size
     derived_gamma = compute_per_step_gamma(
@@ -534,13 +526,11 @@ def main() -> None:
 
             optimizer.zero_grad(set_to_none=True)
 
-            with amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
-                pred_noise = diffusion(x_t, t, labels=None)
-                loss = F.mse_loss(pred_noise, noise)
+            pred_noise = diffusion(x_t, t, labels=None)
+            loss = F.mse_loss(pred_noise, noise)
 
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            loss.backward()
+            optimizer.step()
             scheduler.step()
 
             last_loss = float(loss.item())
