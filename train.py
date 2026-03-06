@@ -24,6 +24,7 @@ from torchvision import datasets, transforms
 from config import FullConfig, compute_per_step_gamma, load_config
 from models.ddim import DDIMDiffusion
 from models.resnet import MinimalResNet
+from models.unet import MinimalUNet
 
 
 DATASET_SIZES = {
@@ -263,9 +264,9 @@ def build_mnist_dataloader(
 def build_backbone(cfg: FullConfig) -> torch.nn.Module:
     if cfg.model.architecture == "resnet":
         return MinimalResNet.from_config(cfg)
-    raise NotImplementedError(
-        "Step 5 only trains the ResNet path. UNet comes in Step 6/7."
-    )
+    if cfg.model.architecture == "unet":
+        return MinimalUNet.from_config(cfg)
+    raise ValueError(f"Unsupported architecture: {cfg.model.architecture!r}")
 
 
 def build_diffusion(cfg: FullConfig, backbone: torch.nn.Module) -> DDIMDiffusion:

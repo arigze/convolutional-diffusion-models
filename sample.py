@@ -15,6 +15,7 @@ from PIL import Image
 from config import FullConfig, load_config
 from models.ddim import DDIMDiffusion
 from models.resnet import MinimalResNet
+from models.unet import MinimalUNet
 
 
 def parse_args() -> argparse.Namespace:
@@ -96,11 +97,11 @@ def configure_torch(device_name: str, deterministic: bool, allow_tf32: bool) -> 
 
 
 def build_backbone(cfg: FullConfig) -> torch.nn.Module:
-    if cfg.model.architecture != "resnet":
-        raise NotImplementedError(
-            f"Current Step 5 sample.py only supports ResNet. Got: {cfg.model.architecture!r}"
-        )
-    return MinimalResNet.from_config(cfg)
+    if cfg.model.architecture == "resnet":
+        return MinimalResNet.from_config(cfg)
+    if cfg.model.architecture == "unet":
+        return MinimalUNet.from_config(cfg)
+    raise ValueError(f"Unsupported architecture: {cfg.model.architecture!r}")
 
 
 def build_diffusion(cfg: FullConfig, backbone: torch.nn.Module) -> DDIMDiffusion:
