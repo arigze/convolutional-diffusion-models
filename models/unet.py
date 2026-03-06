@@ -248,7 +248,7 @@ class MinimalUNet(nn.Module):
         self.upconv2 = nn.ConvTranspose2d(c3, c2, kernel_size=2, stride=2)
         self.up2 = UpBlock(
             in_channels=c2,
-            skip_channels=c2,
+            skip_channels=c3,
             out_channels=c2,
             embedding_dim=embedding_dim,
             padding=padding,
@@ -336,11 +336,10 @@ class MinimalUNet(nn.Module):
         skip2 = self.enc2(h, emb)
         h = self.downsample(skip2)
 
-        h = self.enc3(h, emb)
-        h = self.bottleneck(h, emb)
-
+        skip3 = self.enc3(h, emb)
+        h = self.bottleneck(skip3, emb)
         h = self.upconv2(h)
-        h = self.up2(h, skip2, emb)
+        h = self.up2(h, skip3, emb)
 
         h = self.upconv1(h)
         h = self.up1(h, skip1, emb)
