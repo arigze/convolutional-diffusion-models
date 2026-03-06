@@ -1,0 +1,20 @@
+inherits: base.yaml
+
+dataset:
+  name: cifar10
+  image_size: 32
+  channels: 3
+  num_classes: 10
+  conditional: true
+
+model:
+  architecture: unet
+  in_channels: 3
+  out_channels: 3
+  channel_mults: [64, 128, 256]
+  residual: true
+  embedding_injection: every_block
+  downsample: maxpool
+  upsample: transpose_conv
+  skip_connection: concat
+  padding: zeros

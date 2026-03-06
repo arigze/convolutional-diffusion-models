@@ -1,0 +1,42 @@
+experiment:
+  seed: 42
+  device: cuda
+  deterministic: true
+  allow_tf32: false
+
+training:
+  epochs: 300
+  batch_size: 128
+  optimizer:
+    name: adam
+    lr: 1.0e-4
+    weight_decay: 0.0
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+  lr_schedule:
+    name: exponential_from_half_life
+    halve_every_epochs: 50.0
+    step_unit: optimizer_step
+
+diffusion:
+  prediction_type: eps
+  horizon: 1000
+  noise_schedule: cosine
+  sampler:
+    name: ddim
+    steps: 20
+    eta: 0.0   # deterministic DDIM
+
+model:
+  embedding_dim: 256
+  normalization: none
+  padding: zeros
+
+logging:
+  save_every_epochs: 25
+  sample_every_epochs: 25
+
+artifacts:
+  checkpoints_dir: artifacts/checkpoints
+  samples_dir: artifacts/samples
+  seeds_dir: artifacts/seeds
