@@ -137,7 +137,6 @@ def build_model(cfg: FullConfig) -> DDIM:
     """Build backbone + wrap in DDIM, matching train_script_original behaviour."""
     mult = getattr(cfg.model, "mult", 1)
     layers = getattr(cfg.model, "layers", 3)
-    normal = None if getattr(cfg.model, "nonorm", True) else "GroupNorm"
     padding_mode = cfg.model.padding
 
     if cfg.model.architecture == "unet":
@@ -151,15 +150,14 @@ def build_model(cfg: FullConfig) -> DDIM:
         )
     elif cfg.model.architecture == "resnet":
         backbone = MinimalResNet(
+            default_imsize=cfg.dataset.image_size,
+            k=3,
+            n_mid_layers=layers,
+            hidden_channels=128 * mult,
+            padding_mode=padding_mode,
             channels=cfg.model.in_channels,
-            emb_dim=128 * mult,
-            mode=padding_mode,
             conditional=cfg.dataset.conditional,
             num_classes=cfg.dataset.num_classes,
-            kernel_size=3,
-            num_layers=layers,
-            normalization=normal,
-            lastksize=3,
         )
     else:
         raise ValueError(f"Unsupported architecture: {cfg.model.architecture!r}")
