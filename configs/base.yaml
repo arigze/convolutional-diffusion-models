@@ -33,8 +33,8 @@ model:
   padding: zeros
 
 logging:
-  save_every_epochs: 25
-  sample_every_epochs: 25
+  save_every_epochs: 10
+  sample_every_epochs: 10
 
 artifacts:
   checkpoints_dir: artifacts/checkpoints
