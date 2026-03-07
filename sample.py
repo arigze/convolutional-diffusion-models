@@ -1,288 +1,219 @@
-# from __future__ import annotations
+"""
+Compare samplers: UNet, ResNet (DDIM), IdealScoreMachine, LocalScoreMachine, EquivariantLocalScoreMachine.
 
-# import argparse
-# import json
-# import os
-# from dataclasses import asdict, is_dataclass
-# from pathlib import Path
-# from typing import Any, Optional
+Outputs per sampler:
+  samples/comparisons/{seed}/{name}.npy  -- raw float tensor [C, H, W], use for R² scoring
+  samples/comparisons/{seed}/{name}.png  -- uint8 image normalized to [0,1], use for visualization
 
-# os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+Usage example:
+  python sample.py --dataset mnist --unet-id b5750c10 --is --ls --seed 42
+"""
 
-# import torch
-# from PIL import Image
+from __future__ import annotations
 
-# from config import FullConfig, load_config
-# from models.ddim import DDIMDiffusion
-# from models.resnet import MinimalResNet
-# from models.unet import MinimalUNet
+import argparse
+import math
+from pathlib import Path
 
+import numpy as np
+import torch
+from PIL import Image
 
-# def parse_args() -> argparse.Namespace:
-#     parser = argparse.ArgumentParser(description="Sample deterministically from a saved diffusion checkpoint")
-#     parser.add_argument(
-#         "--config",
-#         type=str,
-#         required=True,
-#         help="Path to experiment YAML config used to rebuild the model",
-#     )
-#     parser.add_argument(
-#         "--checkpoint",
-#         type=str,
-#         required=True,
-#         help="Path to checkpoint .pt file",
-#     )
-#     parser.add_argument(
-#         "--output",
-#         type=str,
-#         required=True,
-#         help="Path to output PNG grid",
-#     )
-#     parser.add_argument(
-#         "--batch-size",
-#         type=int,
-#         default=16,
-#         help="Number of samples to generate",
-#     )
-#     parser.add_argument(
-#         "--seed",
-#         type=int,
-#         required=True,
-#         help="Deterministic sampling seed",
-#     )
-#     parser.add_argument(
-#         "--nsteps",
-#         type=int,
-#         default=None,
-#         help="Override DDIM sampling step count. Defaults to config value.",
-#     )
-#     parser.add_argument(
-#         "--device",
-#         type=str,
-#         default=None,
-#         choices=["cpu", "cuda"],
-#         help="Override device. Defaults to config device.",
-#     )
-#     parser.add_argument(
-#         "--labels",
-#         type=int,
-#         nargs="*",
-#         default=None,
-#         help="Optional class labels for conditional sampling. Omit for unconditional models.",
-#     )
-#     return parser.parse_args()
+from data import get_dataset
+from models import DDIM, MinimalResNet, MinimalUNet
+from score_machines import (
+    EquivariantLocalScoreMachine,
+    IdealScoreMachine,
+    LocalScoreMachine,
+)
+from utils.noise_schedules import cosine_noise_schedule
 
 
-# def configure_torch(device_name: str, deterministic: bool, allow_tf32: bool) -> torch.device:
-#     if device_name == "cuda":
-#         if not torch.cuda.is_available():
-#             raise RuntimeError("CUDA was requested but is not available.")
-#         device = torch.device("cuda")
-#     elif device_name == "cpu":
-#         device = torch.device("cpu")
-#     else:
-#         raise ValueError(f"Unsupported device: {device_name!r}")
+DATASET_INFO = {
+    "mnist":   {"image_size": 28, "channels": 1},
+    "cifar10": {"image_size": 32, "channels": 3},
+}
 
-#     if deterministic:
-#         torch.use_deterministic_algorithms(True)
-#         torch.backends.cudnn.deterministic = True
-#         torch.backends.cudnn.benchmark = False
-#     else:
-#         torch.backends.cudnn.benchmark = True
-
-#     torch.backends.cuda.matmul.allow_tf32 = allow_tf32
-#     torch.backends.cudnn.allow_tf32 = allow_tf32
-
-#     return device
+CHECKPOINTS_ROOT = Path("artifacts/checkpoints")
 
 
-# def build_backbone(cfg: FullConfig) -> torch.nn.Module:
-#     if cfg.model.architecture == "resnet":
-#         return MinimalResNet.from_config(cfg)
-#     if cfg.model.architecture == "unet":
-#         return MinimalUNet.from_config(cfg)
-#     raise ValueError(f"Unsupported architecture: {cfg.model.architecture!r}")
+# ---------------------------------------------------------------------------
+# Noise schedule for score machines (discrete, cosine-derived)
+# ---------------------------------------------------------------------------
+
+def discrete_cosine_schedule(timesteps: int) -> torch.Tensor:
+    """Returns a tensor of `timesteps` beta values using the cosine schedule."""
+    t = torch.linspace(0.0, 1.0, timesteps)
+    return 1.0 - torch.cos(t / 1.008 * math.pi / 2.0) ** 2
 
 
-# def build_diffusion(cfg: FullConfig, backbone: torch.nn.Module) -> DDIMDiffusion:
-#     return DDIMDiffusion.from_config(backbone=backbone, cfg=cfg)
+# ---------------------------------------------------------------------------
+# Model loading
+# ---------------------------------------------------------------------------
+
+def _resolve_checkpoint(dataset: str, model_type: str, model_id: str) -> Path:
+    path = CHECKPOINTS_ROOT / f"{dataset}_{model_type}_{model_id}" / "final.pt"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Checkpoint not found: {path}\n"
+            f"Expected: artifacts/checkpoints/{dataset}_{model_type}_{model_id}/final.pt"
+        )
+    return path
 
 
-# def load_checkpoint(path: str | Path, map_location: torch.device) -> dict[str, Any]:
-#     ckpt = torch.load(path, map_location=map_location)
-#     if not isinstance(ckpt, dict):
-#         raise ValueError(f"Checkpoint must be a dict, got {type(ckpt)!r}")
-#     return ckpt
+def load_ddim(dataset: str, model_type: str, model_id: str, device: torch.device) -> DDIM:
+    ckpt_path = _resolve_checkpoint(dataset, model_type, model_id)
+    print(f"  Loading checkpoint: {ckpt_path}")
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    cfg = ckpt["cfg"]
+
+    arch = cfg["model"]["architecture"]
+    channels = cfg["model"]["in_channels"]
+    image_size = cfg["dataset"]["image_size"]
+    padding_mode = cfg["model"]["padding"]
+    emb_dim = cfg["model"].get("embedding_dim") or cfg["model"].get("hidden_channels", 256)
+    conditional = cfg["dataset"]["conditional"]
+    num_classes = cfg["dataset"]["num_classes"]
+
+    if arch == "unet":
+        backbone = MinimalUNet(
+            channels=channels,
+            fchannels=cfg["model"]["fchannels"],
+            emb_dim=emb_dim,
+            padding_mode=padding_mode,
+            conditional=conditional,
+            num_classes=num_classes,
+        )
+    elif arch == "resnet":
+        backbone = MinimalResNet(
+            default_imsize=image_size,
+            k=3,
+            n_mid_layers=cfg["model"]["num_mid_layers"],
+            hidden_channels=cfg["model"]["hidden_channels"],
+            padding_mode=padding_mode,
+            channels=channels,
+            conditional=conditional,
+            num_classes=num_classes,
+        )
+    else:
+        raise ValueError(f"Unknown architecture in checkpoint: {arch!r}")
+
+    model = DDIM(
+        pretrained_backbone=backbone,
+        default_imsize=image_size,
+        in_channels=channels,
+        noise_schedule=cosine_noise_schedule,
+    )
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+    return model.to(device)
 
 
-# def maybe_build_labels(
-#     labels_arg: Optional[list[int]],
-#     *,
-#     batch_size: int,
-#     conditional: bool,
-#     num_classes: Optional[int],
-#     device: torch.device,
-# ) -> Optional[torch.Tensor]:
-#     if not conditional:
-#         if labels_arg is not None:
-#             raise ValueError("This config is unconditional, so --labels must not be provided.")
-#         return None
+# ---------------------------------------------------------------------------
+# Saving
+# ---------------------------------------------------------------------------
 
-#     if labels_arg is None:
-#         raise ValueError("This config is conditional, so --labels is required.")
+def save_sample(tensor: torch.Tensor, out_dir: Path, name: str) -> None:
+    """
+    Save a [C, H, W] float tensor as:
+      - {name}.npy : raw floats (for R² computation)
+      - {name}.png : uint8 normalized to display range (for visualization)
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-#     if len(labels_arg) == 0:
-#         raise ValueError("If provided, --labels must contain at least one integer.")
+    arr = tensor.detach().cpu().float().numpy()  # [C, H, W]
+    np.save(out_dir / f"{name}.npy", arr)
 
-#     if len(labels_arg) == 1:
-#         labels_arg = labels_arg * batch_size
-#     elif len(labels_arg) != batch_size:
-#         raise ValueError(
-#             f"For conditional sampling, number of labels must be either 1 or batch_size. "
-#             f"Got len(labels)={len(labels_arg)}, batch_size={batch_size}."
-#         )
+    # Normalize from model range [-1, 1] -> [0, 255]
+    vis = ((arr * 0.5 + 0.5).clip(0.0, 1.0) * 255.0).round().astype(np.uint8)
+    if vis.shape[0] == 1:
+        img = Image.fromarray(vis[0], mode="L")
+    else:
+        img = Image.fromarray(vis.transpose(1, 2, 0), mode="RGB")
+    img.save(out_dir / f"{name}.png")
 
-#     if num_classes is not None:
-#         bad = [x for x in labels_arg if x < 0 or x >= num_classes]
-#         if bad:
-#             raise ValueError(
-#                 f"Labels out of range for num_classes={num_classes}: {bad}"
-#             )
-
-#     return torch.tensor(labels_arg, dtype=torch.long, device=device)
+    print(f"  Saved: {out_dir / name}.npy + .png")
 
 
-# def denormalize_model_range_to_image(x: torch.Tensor) -> torch.Tensor:
-#     return ((x.clamp(-1.0, 1.0) + 1.0) * 0.5).clamp(0.0, 1.0)
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Sample from diffusion models and score machines, saving outputs for comparison."
+    )
+    parser.add_argument("--dataset", required=True, choices=["mnist", "cifar10"])
+    parser.add_argument("--unet-id",   default=None, help="Unique ID of the UNet checkpoint (e.g. b5750c10)")
+    parser.add_argument("--resnet-id", default=None, help="Unique ID of the ResNet checkpoint")
+    parser.add_argument("--is",  dest="ideal_score",             action="store_true", help="Sample IdealScoreMachine")
+    parser.add_argument("--ls",  dest="local_score",             action="store_true", help="Sample LocalScoreMachine")
+    parser.add_argument("--els", dest="equivariant_local_score", action="store_true", help="Sample EquivariantLocalScoreMachine")
+    parser.add_argument("--seed",      type=int, required=True,  help="Seed for shared initial noise")
+    parser.add_argument("--timesteps", type=int, default=100,    help="Discrete timesteps for score machines (default: 100)")
+    parser.add_argument("--nsteps",    type=int, default=20,     help="DDIM sampling steps for neural models (default: 20)")
+    return parser.parse_args()
 
 
-# def make_grayscale_grid(samples: torch.Tensor, nrow: int = 4) -> Image.Image:
-#     if samples.ndim != 4 or samples.shape[1] != 1:
-#         raise ValueError(f"Expected grayscale samples [B,1,H,W], got {tuple(samples.shape)}")
+def main() -> None:
+    args = parse_args()
 
-#     samples = samples.detach().cpu()
-#     b, _, h, w = samples.shape
-#     nrow = max(1, nrow)
-#     ncol = (b + nrow - 1) // nrow
+    device = torch.device(
+        "cuda" if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available()
+        else "cpu"
+    )
+    print(f"Device : {device}")
+    print(f"Dataset: {args.dataset}  |  Seed: {args.seed}")
 
-#     grid = torch.zeros((ncol * h, nrow * w), dtype=torch.float32)
+    info = DATASET_INFO[args.dataset]
+    channels   = info["channels"]
+    image_size = info["image_size"]
 
-#     for idx in range(b):
-#         row = idx // nrow
-#         col = idx % nrow
-#         grid[row * h : (row + 1) * h, col * w : (col + 1) * w] = samples[idx, 0]
+    # Shared initial noise [C, H, W] — same starting point for every sampler
+    torch.manual_seed(args.seed)
+    x0 = torch.randn(channels, image_size, image_size)
 
-#     arr = (grid.numpy() * 255.0).round().astype("uint8")
-#     return Image.fromarray(arr, mode="L")
+    out_dir = Path("samples") / "comparisons" / str(args.seed)
 
+    # ------------------------------------------------------------------
+    # Neural DDIM models (UNet / ResNet)
+    # ------------------------------------------------------------------
+    for model_type, model_id in [("unet", args.unet_id), ("resnet", args.resnet_id)]:
+        if model_id is None:
+            continue
+        print(f"\n[{model_type.upper()} {model_id}]")
+        model = load_ddim(args.dataset, model_type, model_id, device)
+        x_in = x0.unsqueeze(0).to(device)  # [1, C, H, W]
+        with torch.no_grad():
+            sample = model.sample(batch_size=1, x=x_in, nsteps=args.nsteps, device=device)
+        save_sample(sample.squeeze(0).cpu(), out_dir, f"{model_type}_{model_id}")
 
-# def make_rgb_grid(samples: torch.Tensor, nrow: int = 4) -> Image.Image:
-#     if samples.ndim != 4 or samples.shape[1] != 3:
-#         raise ValueError(f"Expected RGB samples [B,3,H,W], got {tuple(samples.shape)}")
+    # ------------------------------------------------------------------
+    # Score machines (non-parametric, need the full dataset)
+    # ------------------------------------------------------------------
+    need_dataset = args.ideal_score or args.local_score or args.equivariant_local_score
+    if need_dataset:
+        print("\nLoading dataset for score machines...")
+        dataset = get_dataset(args.dataset, (image_size, image_size))
 
-#     samples = samples.detach().cpu()
-#     b, c, h, w = samples.shape
-#     nrow = max(1, nrow)
-#     ncol = (b + nrow - 1) // nrow
+        score_machines = []
+        if args.ideal_score:
+            score_machines.append(("ideal_score_machine", IdealScoreMachine))
+        if args.local_score:
+            score_machines.append(("local_score_machine", LocalScoreMachine))
+        if args.equivariant_local_score:
+            score_machines.append(("equivariant_local_score_machine", EquivariantLocalScoreMachine))
 
-#     grid = torch.zeros((ncol * h, nrow * w, c), dtype=torch.float32)
+        for name, SMClass in score_machines:
+            print(f"\n[{name}]")
+            sm = SMClass(discrete_cosine_schedule, dataset, 256, args.timesteps)
+            with torch.no_grad():
+                sample = sm.sample(x0.clone(), device=device)
+            save_sample(sample.cpu(), out_dir, name)
 
-#     for idx in range(b):
-#         row = idx // nrow
-#         col = idx % nrow
-#         tile = samples[idx].permute(1, 2, 0)
-#         grid[row * h : (row + 1) * h, col * w : (col + 1) * w, :] = tile
-
-#     arr = (grid.numpy() * 255.0).round().astype("uint8")
-#     return Image.fromarray(arr, mode="RGB")
-
-
-# def save_image_grid(samples: torch.Tensor, out_path: str | Path, nrow: int = 4) -> None:
-#     samples = denormalize_model_range_to_image(samples)
-#     channels = samples.shape[1]
-
-#     if channels == 1:
-#         img = make_grayscale_grid(samples, nrow=nrow)
-#     elif channels == 3:
-#         img = make_rgb_grid(samples, nrow=nrow)
-#     else:
-#         raise ValueError(f"Unsupported channel count for image saving: {channels}")
-
-#     out_path = Path(out_path)
-#     out_path.parent.mkdir(parents=True, exist_ok=True)
-#     img.save(out_path)
-
-
-# def main() -> None:
-#     args = parse_args()
-
-#     cfg = load_config(args.config)
-
-#     device_name = args.device or cfg.experiment.device
-#     device = configure_torch(
-#         device_name=device_name,
-#         deterministic=cfg.experiment.deterministic,
-#         allow_tf32=cfg.experiment.allow_tf32,
-#     )
-
-#     backbone = build_backbone(cfg).to(device)
-#     diffusion = build_diffusion(cfg, backbone).to(device)
-
-#     ckpt = load_checkpoint(args.checkpoint, map_location=device)
-
-#     if "backbone_state_dict" not in ckpt:
-#         raise KeyError("Checkpoint missing 'backbone_state_dict'")
-#     if "diffusion_state_dict" not in ckpt:
-#         raise KeyError("Checkpoint missing 'diffusion_state_dict'")
-
-#     backbone.load_state_dict(ckpt["backbone_state_dict"])
-#     diffusion.load_state_dict(ckpt["diffusion_state_dict"])
-
-#     diffusion.eval()
-
-#     labels = maybe_build_labels(
-#         args.labels,
-#         batch_size=args.batch_size,
-#         conditional=cfg.dataset.conditional,
-#         num_classes=cfg.dataset.num_classes,
-#         device=device,
-#     )
-
-#     nsteps = args.nsteps if args.nsteps is not None else cfg.diffusion.sampler.steps
-
-#     with torch.no_grad():
-#         samples = diffusion.sample(
-#             batch_size=args.batch_size,
-#             nsteps=nsteps,
-#             seed=args.seed,
-#             labels=labels,
-#             device=device,
-#         )
-
-#     save_image_grid(samples, args.output, nrow=4)
-
-#     metadata = {
-#         "config": args.config,
-#         "checkpoint": args.checkpoint,
-#         "output": args.output,
-#         "batch_size": args.batch_size,
-#         "seed": args.seed,
-#         "nsteps": nsteps,
-#         "device": str(device),
-#         "conditional": cfg.dataset.conditional,
-#         "labels": None if labels is None else labels.detach().cpu().tolist(),
-#         "checkpoint_epoch": ckpt.get("epoch"),
-#         "checkpoint_global_step": ckpt.get("global_step"),
-#     }
-
-#     meta_path = Path(args.output).with_suffix(".json")
-#     with meta_path.open("w", encoding="utf-8") as f:
-#         json.dump(metadata, f, indent=2)
-
-#     print(f"Loaded checkpoint: {args.checkpoint}")
-#     print(f"Saved samples to : {args.output}")
-#     print(f"Saved metadata to: {meta_path}")
+    print(f"\nAll outputs saved to: {out_dir}/")
 
 
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    main()
