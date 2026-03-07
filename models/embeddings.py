@@ -12,20 +12,6 @@ def sinusoidal_timestep_embedding(
     embedding_dim: int,
     max_period: int = 10000,
 ) -> torch.Tensor:
-    """
-    Build standard sinusoidal timestep embeddings.
-
-    Args:
-        timesteps:
-            Tensor of shape [B] or [B, 1]. Integer or floating-point timesteps.
-        embedding_dim:
-            Output embedding dimension.
-        max_period:
-            Controls the minimum frequency in the embedding.
-
-    Returns:
-        Tensor of shape [B, embedding_dim] on the same device as `timesteps`.
-    """
     if timesteps.ndim == 2:
         if timesteps.shape[1] != 1:
             raise ValueError(
@@ -52,10 +38,9 @@ def sinusoidal_timestep_embedding(
         dtype=torch.float32,
         device=device,
     ) / half_dim
-    freqs = torch.exp(freq_exponent)  # [half_dim]
-
-    args = timesteps[:, None] * freqs[None, :]  # [B, half_dim]
-    emb = torch.cat([torch.cos(args), torch.sin(args)], dim=1)  # [B, 2 * half_dim]
+    freqs = torch.exp(freq_exponent)
+    args = timesteps[:, None] * freqs[None, :]
+    emb = torch.cat([torch.cos(args), torch.sin(args)], dim=1)
 
     if embedding_dim % 2 == 1:
         emb = torch.cat(
@@ -67,20 +52,6 @@ def sinusoidal_timestep_embedding(
 
 
 class TimestepLabelEmbedding(nn.Module):
-    """
-    Step-2 embedding module.
-
-    Supports:
-    - unconditional: sinusoidal timestep embedding only
-    - conditional: timestep embedding + learned class embedding
-
-    Expected usage:
-        emb = module(timesteps=t, labels=y_or_none)
-
-    Output:
-        [B, embedding_dim]
-    """
-
     def __init__(
         self,
         embedding_dim: int,
@@ -92,7 +63,6 @@ class TimestepLabelEmbedding(nn.Module):
 
         if embedding_dim < 2:
             raise ValueError(f"embedding_dim must be >= 2, got {embedding_dim}.")
-
         if conditional and num_classes is None:
             raise ValueError("Conditional embedding requires num_classes.")
         if not conditional and num_classes is not None:
@@ -111,16 +81,6 @@ class TimestepLabelEmbedding(nn.Module):
 
     @classmethod
     def from_config(cls, cfg) -> "TimestepLabelEmbedding":
-        """
-        Construct from a config object that exposes:
-
-        - cfg.model.embedding_dim
-        - cfg.dataset.conditional
-        - cfg.dataset.num_classes
-
-        This works with the project's FullConfig dataclass and also with
-        lightweight test objects that mimic the same attribute structure.
-        """
         try:
             embedding_dim = cfg.model.embedding_dim
             conditional = cfg.dataset.conditional
@@ -142,17 +102,6 @@ class TimestepLabelEmbedding(nn.Module):
         timesteps: torch.Tensor,
         labels: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Args:
-            timesteps:
-                [B] or [B, 1]
-            labels:
-                None for unconditional models
-                [B] for conditional models
-
-        Returns:
-            [B, embedding_dim]
-        """
         time_emb = sinusoidal_timestep_embedding(
             timesteps=timesteps,
             embedding_dim=self.embedding_dim,
@@ -179,6 +128,5 @@ class TimestepLabelEmbedding(nn.Module):
             )
 
         labels = labels.to(device=time_emb.device, dtype=torch.long)
-
         class_emb = self.class_embedding(labels)
         return time_emb + class_emb

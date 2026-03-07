@@ -34,6 +34,21 @@ def _padding_mode_to_torch(mode: str) -> str:
 
 
 class ConvWithEmbedding(nn.Module):
+    """
+    Single conv layer with embedding injection.
+
+    Matches the author's UBlock design: the embedding is projected and added
+    to the input feature map BEFORE the convolution runs, so the conv sees
+    the time-conditioned activations directly.
+
+    Author's pattern:
+        return self.model(x + self.emb(embedding)[:,:,None,None])
+
+    Previous (wrong) pattern:
+        h = conv(x)
+        return h + proj(emb)   # embedding added AFTER conv — incorrect
+    """
+
     def __init__(
         self,
         *,
@@ -57,7 +72,14 @@ class ConvWithEmbedding(nn.Module):
             padding_mode=_padding_mode_to_torch(padding_mode),
             bias=True,
         )
-        self.embedding_proj = nn.Linear(embedding_dim, out_channels, bias=True)
+        # FIX: ReLU before the Linear matches the author's
+        #   self.emb = nn.Sequential(nn.ReLU(), nn.Linear(emb_dim, infeatures))
+        # The previous bare nn.Linear had no nonlinearity, which severely
+        # limits how expressively the network can condition on time.
+        self.embedding_proj = nn.Sequential(
+            nn.ReLU(),
+            nn.Linear(embedding_dim, in_channels, bias=True),
+        )
 
     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
         if emb.ndim != 2:
@@ -67,9 +89,11 @@ class ConvWithEmbedding(nn.Module):
                 f"x and emb batch sizes must match: got {x.shape[0]} vs {emb.shape[0]}"
             )
 
-        h = self.conv(x)
-        emb_bias = self.embedding_proj(emb).to(dtype=h.dtype)
-        return h + emb_bias[:, :, None, None]
+        # FIX: inject embedding into x BEFORE the conv, not after.
+        # The author does: self.model(x + self.emb(embedding)[:,:,None,None])
+        emb_bias = self.embedding_proj(emb).to(dtype=x.dtype)
+        h = self.conv(x + emb_bias[:, :, None, None])
+        return h
 
 
 class ResidualUBlock(nn.Module):
@@ -154,33 +178,14 @@ class MinimalUNet(nn.Module):
     """
     Minimal three-scale UNet for the paper's CNN diffusion experiments.
 
-    Structure:
-        enc1: UBlock(in  -> c1)           [H,   W  ]  -> skip1
-        maxpool
-        enc2: UBlock(c1  -> c2)           [H/2, W/2]  -> skip2
-        maxpool
-        enc3: UBlock(c2  -> c3)           [H/4, W/4]  -> skip3
-        bottleneck: UBlock(c3 -> c3)      [H/4, W/4]
-        up3: concat(bottleneck, skip3), UBlock(2*c3 -> c3)  [H/4, W/4]
-        upconv2: ConvTranspose c3 -> c2   [H/2, W/2]
-        up2: concat(up3_out, skip2), UBlock(2*c2 -> c2)     [H/2, W/2]
-        upconv1: ConvTranspose c2 -> c1   [H,   W  ]
-        up1: concat(up2_out, skip1), UBlock(2*c1 -> c1)     [H,   W  ]
-        final 3x3 conv c1 -> out_channels
-
-    Note: enc3 and bottleneck share the same spatial resolution — there is
-    no third maxpool. This correctly handles non-power-of-2 image sizes
-    (e.g. MNIST 28x28 where 28->14->7 is fine, but 7->3 is lossy and
-    produces a 6-pixel mismatch on the transpose conv back up).
-
-    Design:
-        - residualized blocks
-        - timestep/class embedding injected into every block
-        - no normalization
-        - maxpool downsampling (x2 downsamples)
-        - transpose-conv upsampling (x2 upsamples)
-        - skip connections via concatenation at all three encoder scales
-        - zero or circular padding
+    Fixes applied vs original:
+      1. enc3 skip connection: enc3 output is now saved and used in up3
+         (previously it was computed but silently discarded).
+      2. Embedding injection order: embedding is now added to x BEFORE
+         the conv (matching the author), not added to the conv output after.
+      3. Embedding projection: now uses ReLU before the Linear
+         (matching the author's nn.Sequential(nn.ReLU(), nn.Linear(...))),
+         giving the network nonlinear time conditioning.
     """
 
     def __init__(
@@ -224,7 +229,6 @@ class MinimalUNet(nn.Module):
 
         self.downsample = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        # ── Encoder ──────────────────────────────────────────────────────────
         self.enc1 = ResidualUBlock(
             in_channels=in_channels,
             out_channels=c1,
@@ -246,8 +250,6 @@ class MinimalUNet(nn.Module):
             padding=padding,
             residual=residual,
         )
-
-        # ── Bottleneck ────────────────────────────────────────────────────────
         self.bottleneck = ResidualUBlock(
             in_channels=c3,
             out_channels=c3,
@@ -256,11 +258,6 @@ class MinimalUNet(nn.Module):
             residual=residual,
         )
 
-        # ── Decoder ───────────────────────────────────────────────────────────
-        # up3 merges the bottleneck output with the enc3 skip at the same
-        # spatial resolution — no transpose conv at this scale.
-        # Previously this block was missing entirely; enc3's features were
-        # computed but never used anywhere in the decoder.
         self.up3 = UpBlock(
             in_channels=c3,
             skip_channels=c3,
@@ -355,28 +352,21 @@ class MinimalUNet(nn.Module):
         t = _normalize_timesteps(t, batch_size=batch_size, device=device)
         emb = self.embedding(timesteps=t, labels=labels)
 
-        # ── Encoder ──────────────────────────────────────────────────────────
-        skip1 = self.enc1(x_t, emb)       # [B, c1, H,   W  ]
-        h = self.downsample(skip1)         # [B, c1, H/2, W/2]
+        skip1 = self.enc1(x_t, emb)
+        h = self.downsample(skip1)
 
-        skip2 = self.enc2(h, emb)          # [B, c2, H/2, W/2]
-        h = self.downsample(skip2)         # [B, c2, H/4, W/4]
+        skip2 = self.enc2(h, emb)
+        h = self.downsample(skip2)
 
-        skip3 = self.enc3(h, emb)          # [B, c3, H/4, W/4]  ← FIX: saved as skip
+        skip3 = self.enc3(h, emb)
+        h = self.bottleneck(skip3, emb)
+        h = self.up3(h, skip3, emb)
 
-        # ── Bottleneck ────────────────────────────────────────────────────────
-        h = self.bottleneck(skip3, emb)    # [B, c3, H/4, W/4]
+        h = self.upconv2(h)
+        h = self.up2(h, skip2, emb)
 
-        # ── Decoder ───────────────────────────────────────────────────────────
-        # FIX: up3 now uses the enc3 skip at the same spatial resolution.
-        # Previously enc3 output was silently discarded.
-        h = self.up3(h, skip3, emb)        # [B, c3, H/4, W/4]
-
-        h = self.upconv2(h)                # [B, c2, H/2, W/2]
-        h = self.up2(h, skip2, emb)        # [B, c2, H/2, W/2]
-
-        h = self.upconv1(h)                # [B, c1, H,   W  ]
-        h = self.up1(h, skip1, emb)        # [B, c1, H,   W  ]
+        h = self.upconv1(h)
+        h = self.up1(h, skip1, emb)
 
         out = self.final_conv(h)
         expected_shape = x_t.shape[:1] + (self.out_channels,) + x_t.shape[2:]
