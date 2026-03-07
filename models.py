@@ -108,7 +108,7 @@ class MinimalUNet(nn.Module):
             out_channels = fchannels[i-1]
             self.upsample_blocks.append(nn.ConvTranspose2d(in_channels=in_channels, out_channels=out_channels, kernel_size=2, stride=2))
             # 2x in_channels due to concatenation of the skip connection from the corresponding encoder block along the channel axis.
-            self.decoder_blocks.append(UBlock(in_features=2 * in_channels, out_features=out_channels, k=k, padding_mode=padding_mode, depth=ublock_depth, emb_dim=emb_dim))
+            self.decoder_blocks.append(UBlock(in_features=2 * out_channels, out_features=out_channels, k=k, padding_mode=padding_mode, depth=ublock_depth, emb_dim=emb_dim))
 
         self.last_emb = nn.Sequential(nn.ReLU(), nn.Linear(emb_dim, fchannels[0]))
         self.output_conv = nn.Conv2d(in_channels=fchannels[0], out_channels=channels, kernel_size=1, padding='same', padding_mode=padding_mode)
