@@ -1,0 +1,19 @@
+inherits: base.yaml
+
+dataset:
+  name: cifar10
+  image_size: 32
+  channels: 3
+  num_classes: 10
+  conditional: true
+
+model:
+  architecture: resnet
+  in_channels: 3
+  out_channels: 3
+  hidden_channels: 256
+  kernel_size: 3
+  num_mid_layers: 6
+  residual: true
+  embedding_injection: every_layer
+  padding: zeros

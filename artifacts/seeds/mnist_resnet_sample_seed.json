@@ -1,0 +1,7 @@
+{
+  "run_name": "mnist_resnet",
+  "sample_seed": 42,
+  "conditional": false,
+  "labels": null,
+  "sampling_steps": 20
+}
