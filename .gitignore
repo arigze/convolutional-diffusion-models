@@ -66,6 +66,7 @@ data/
 artifacts/checkpoints/
 artifacts/samples/
 artifacts/seeds/
+artifacts/configs/
 
 ########################################
 # Torch / model artifacts
