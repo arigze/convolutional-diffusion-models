@@ -288,8 +288,10 @@ def main() -> None:
     cfg = load_config(args.config)
     run_id = make_run_id(args.config)
 
-    checkpoints_dir = Path(cfg.artifacts.checkpoints_dir)
+    checkpoints_dir = Path(cfg.artifacts.checkpoints_dir) / run_id
+    samples_dir = Path(cfg.artifacts.samples_dir) / run_id
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    samples_dir.mkdir(parents=True, exist_ok=True)
 
     set_global_seed(cfg.experiment.seed)
     device = configure_torch(cfg)
@@ -381,11 +383,11 @@ def main() -> None:
         print(f"Epoch {epoch:03d} complete | avg_loss={epoch_avg_loss:.6f}")
 
         if epoch % sample_every == 0 or epoch == total_epochs:
-            sample_path = Path(cfg.artifacts.samples_dir) / f"{run_id}_epoch_{epoch:03d}.png"
+            sample_path = samples_dir / f"epoch_{epoch:03d}.png"
             save_samples(path=sample_path, model=model, cfg=cfg, device=device)
 
         if epoch % save_every == 0 or epoch == total_epochs:
-            ckpt_path = checkpoints_dir / f"{run_id}_epoch_{epoch:03d}.pt"
+            ckpt_path = checkpoints_dir / f"epoch_{epoch:03d}.pt"
             save_checkpoint(
                 path=ckpt_path,
                 epoch=epoch,
@@ -398,11 +400,11 @@ def main() -> None:
             )
             print(f"Saved checkpoint : {ckpt_path}")
 
-    loss_log_path = checkpoints_dir / f"{run_id}_loss_log.json"
+    loss_log_path = checkpoints_dir / "loss_log.json"
     save_json(loss_log_path, loss_log)
     print(f"Saved loss log   : {loss_log_path}")
 
-    final_ckpt = checkpoints_dir / f"{run_id}_final.pt"
+    final_ckpt = checkpoints_dir / "final.pt"
     save_checkpoint(
         path=final_ckpt,
         epoch=total_epochs,
