@@ -88,10 +88,10 @@ class MinimalResNet(nn.Module):
     """
     Minimal ResNet backbone for the paper's convolution-only diffusion experiments.
 
-    Structure:
-        input projection conv
-        6 intermediate residual conv layers
-        output projection conv
+    Structure (App. C.1):
+        input projection conv   (in_channels -> hidden_channels)  + residual via 1x1 projection
+        6 intermediate residual conv layers                        (hidden_channels -> hidden_channels)
+        output projection conv  (hidden_channels -> out_channels)  no residual, no activation
 
     Design:
         - hidden width = 256
@@ -100,6 +100,8 @@ class MinimalResNet(nn.Module):
         - no normalization
         - zero or circular padding
         - output has same shape as input
+        - residual connections on ALL layers (input projection uses a 1x1 conv
+          shortcut when in_channels != hidden_channels, matching He et al. 2016)
     """
 
     def __init__(
@@ -148,6 +150,19 @@ class MinimalResNet(nn.Module):
             padding_mode=padding,
         )
 
+        # FIX: 1x1 projection shortcut for the input layer residual connection.
+        # The input layer changes channel depth (e.g. 1->256 for MNIST, 3->256
+        # for CIFAR10), so a direct identity shortcut is impossible. A 1x1 conv
+        # projects the input to hidden_channels so the residual can be added,
+        # exactly as in He et al. (2016). Previously the input layer had NO
+        # residual connection at all, inconsistent with the paper's description
+        # of residual connections between layers.
+        self.input_skip: nn.Module
+        if in_channels != hidden_channels:
+            self.input_skip = nn.Conv2d(in_channels, hidden_channels, kernel_size=1, bias=True)
+        else:
+            self.input_skip = nn.Identity()
+
         self.mid_layers = nn.ModuleList(
             [
                 ConvWithEmbedding(
@@ -161,6 +176,8 @@ class MinimalResNet(nn.Module):
             ]
         )
 
+        # Output layer: projects back to out_channels. No residual or activation —
+        # the raw predicted noise should be unconstrained.
         self.output_layer = ConvWithEmbedding(
             in_channels=hidden_channels,
             out_channels=out_channels,
@@ -221,14 +238,19 @@ class MinimalResNet(nn.Module):
         t = _normalize_timesteps(t, batch_size=batch_size, device=device)
         emb = self.embedding(timesteps=t, labels=labels)
 
-        h = self.input_layer(x_t, emb)
-        h = self.activation(h)
+        # Input layer with residual via 1x1 projection shortcut
+        # FIX: previously there was no residual here at all.
+        delta = self.input_layer(x_t, emb)
+        delta = self.activation(delta)
+        h = delta + self.input_skip(x_t)
 
+        # 6 intermediate residual layers (channels constant, identity shortcut)
         for layer in self.mid_layers:
             delta = layer(h, emb)
             delta = self.activation(delta)
             h = h + delta
 
+        # Output projection — no residual, no activation
         out = self.output_layer(h, emb)
 
         if out.shape != x_t.shape[:1] + (self.out_channels,) + x_t.shape[2:]:
