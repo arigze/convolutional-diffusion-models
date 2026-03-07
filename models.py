@@ -200,7 +200,7 @@ class UBlock(nn.Module):
                  emb_dim=32):
         super().__init__()
 
-        self.emb = nn.Sequential(nn.ReLU(), nn.Linear(emb_dim, in_features))
+        self.emb = nn.Sequential(nn.ReLU(), nn.Linear(emb_dim, out_features))
 
         module_list = []
         for i in range(depth):
@@ -215,4 +215,4 @@ class UBlock(nn.Module):
         self.model = nn.Sequential(*module_list)
 
     def forward(self, x, embedding):
-        return self.model(x + self.emb(embedding)[:, :, None, None])
+        return self.model(x) + self.emb(embedding)[:, :, None, None]
