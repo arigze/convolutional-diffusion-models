@@ -14,7 +14,7 @@ import torch.nn.functional as F
 import torchvision.datasets as tv_datasets
 import torchvision.transforms as transforms
 import torchvision.utils as tv_utils
-from torch.optim import AdamW
+from torch.optim import Adam
 from torch.optim.lr_scheduler import ExponentialLR
 from torch.utils.data import DataLoader
 
@@ -177,10 +177,10 @@ def build_model(cfg: FullConfig) -> DDIM:
 # Optimizer & scheduler
 # ---------------------------------------------------------------------------
 
-def build_optimizer(cfg: FullConfig, model: torch.nn.Module) -> AdamW:
+def build_optimizer(cfg: FullConfig, model: torch.nn.Module) -> Adam:
     if cfg.training.optimizer.name != "adam":
-        raise ValueError(f"Only AdamW is supported, got {cfg.training.optimizer.name!r}")
-    return AdamW(
+        raise ValueError(f"Only Adam is supported, got {cfg.training.optimizer.name!r}")
+    return Adam(
         model.parameters(),
         lr=cfg.training.optimizer.lr,
         betas=cfg.training.optimizer.betas,
@@ -189,7 +189,7 @@ def build_optimizer(cfg: FullConfig, model: torch.nn.Module) -> AdamW:
     )
 
 
-def build_scheduler(cfg: FullConfig, optimizer: AdamW, factor: int = 1) -> ExponentialLR:
+def build_scheduler(cfg: FullConfig, optimizer: Adam, factor: int = 1) -> ExponentialLR:
     if cfg.dataset.name not in DATASET_SIZES:
         raise ValueError(f"Unknown dataset {cfg.dataset.name!r}. Expected one of {sorted(DATASET_SIZES)}")
     gamma = compute_per_step_gamma(
@@ -211,7 +211,7 @@ def save_checkpoint(
     global_step: int,
     cfg: FullConfig,
     model: torch.nn.Module,
-    optimizer: AdamW,
+    optimizer: Adam,
     scheduler: ExponentialLR,
     last_loss: float,
 ) -> None:
@@ -235,7 +235,7 @@ def load_checkpoint(
     path: Path,
     device: torch.device,
     model: torch.nn.Module,
-    optimizer: AdamW,
+    optimizer: Adam,
     scheduler: ExponentialLR,
 ) -> tuple[int, int, float]:
     ckpt = torch.load(path, map_location=device)
