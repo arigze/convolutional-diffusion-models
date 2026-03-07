@@ -56,14 +56,22 @@ class EmbeddingModule(nn.Module):
 
         self.emb_dim = emb_dim
         self.conditional = conditional
+
+        self.mlp = nn.Sequential(
+            nn.Linear(emb_dim, emb_dim * 4),
+            nn.SiLU(),
+            nn.Linear(emb_dim * 4, emb_dim),
+        )
+
         if conditional:
             self.class_embeddings = nn.Embedding(num_classes, emb_dim)
-        
+
     def forward(self, t, label=None):
         d = self.emb_dim // 2
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        targ = t[:,None] / (10000**(torch.arange(d, device=device) / (d-1)))[None,:]
+        targ = t[:,None] / (10000**(torch.arange(d, device=t.device) / (d-1)))[None,:]
         emb = torch.cat((torch.sin(targ), torch.cos(targ)), dim=1)
+
+        emb = self.mlp(emb)
 
         if self.conditional:
             emb += self.class_embeddings(label)
