@@ -89,7 +89,7 @@ class ModelConfig:
     embedding_injection: Optional[str] = None
 
     # UNet-only
-    channel_mults: Optional[list[int]] = None
+    fchannels: Optional[list[int]] = None
     residual: Optional[bool] = None
     downsample: Optional[str] = None
     upsample: Optional[str] = None
@@ -176,7 +176,7 @@ def load_config(path: str | Path) -> FullConfig:
             kernel_size=raw["model"].get("kernel_size"),
             num_mid_layers=raw["model"].get("num_mid_layers"),
             embedding_injection=raw["model"].get("embedding_injection"),
-            channel_mults=raw["model"].get("channel_mults"),
+            fchannels=raw["model"].get("fchannels"),
             residual=raw["model"].get("residual"),
             downsample=raw["model"].get("downsample"),
             upsample=raw["model"].get("upsample"),
@@ -206,8 +206,8 @@ def validate_config(cfg: FullConfig) -> None:
         if any(v is None for v in required):
             raise ValueError("ResNet config missing required fields.")
     elif cfg.model.architecture == "unet":
-        if cfg.model.channel_mults is None:
-            raise ValueError("UNet config missing channel_mults.")
+        if cfg.model.fchannels is None:
+            raise ValueError("UNet config missing fchannels.")
     else:
         raise ValueError(f"Unknown architecture: {cfg.model.architecture}")
 

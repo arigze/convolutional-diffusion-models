@@ -1,175 +1,57 @@
 from __future__ import annotations
 
-import os
-os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-
 import argparse
 import json
+import os
 import random
-import shutil
+import uuid
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from pprint import pformat
-from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
+import torchvision.datasets as tv_datasets
+import torchvision.transforms as transforms
+import torchvision.utils as tv_utils
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ExponentialLR
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 
 from config import FullConfig, compute_per_step_gamma, load_config
-from models.ddim import DDIMDiffusion
-from models.resnet import MinimalResNet
-from models.unet import MinimalUNet
+from models import MinimalUNet, MinimalResNet, DDIM
+from utils.noise_schedules import cosine_noise_schedule
 
 
 DATASET_SIZES = {
     "mnist": 60000,
     "cifar10": 50000,
+    "fashion-mnist": 60000,
 }
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Step 5 - MNIST ResNet training")
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to experiment YAML config",
-    )
-    parser.add_argument(
-        "--data-root",
-        type=str,
-        default="./data",
-        help="Directory where torchvision datasets will be stored",
-    )
-    parser.add_argument(
-        "--num-workers",
-        type=int,
-        default=0,
-        help="DataLoader workers. Keep 0 for max debuggability/determinism.",
-    )
-    parser.add_argument(
-        "--resume",
-        type=str,
-        default=None,
-        help="Optional path to a checkpoint to resume from",
-    )
+    parser = argparse.ArgumentParser(description="Diffusion model training (UNet / ResNet)")
+    parser.add_argument("--config", type=str, required=True, help="Path to experiment YAML config")
+    parser.add_argument("--data-root", type=str, default="./data", help="Directory for torchvision datasets")
+    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers")
+    parser.add_argument("--resume", type=str, default=None, help="Path to a checkpoint to resume from")
     return parser.parse_args()
 
 
-def ensure_artifact_dirs(cfg: FullConfig) -> None:
-    Path(cfg.artifacts.checkpoints_dir).mkdir(parents=True, exist_ok=True)
-    Path(cfg.artifacts.samples_dir).mkdir(parents=True, exist_ok=True)
-    Path(cfg.artifacts.seeds_dir).mkdir(parents=True, exist_ok=True)
+def make_run_id(config_path: str) -> str:
+    stem = Path(config_path).stem
+    short_id = uuid.uuid4().hex[:8]
+    return f"{stem}_{short_id}"
 
 
-def summarize_config(cfg: FullConfig) -> dict:
-    return {
-        "experiment": {
-            "seed": cfg.experiment.seed,
-            "device": cfg.experiment.device,
-            "deterministic": cfg.experiment.deterministic,
-            "allow_tf32": cfg.experiment.allow_tf32,
-        },
-        "dataset": {
-            "name": cfg.dataset.name,
-            "image_size": cfg.dataset.image_size,
-            "channels": cfg.dataset.channels,
-            "conditional": cfg.dataset.conditional,
-            "num_classes": cfg.dataset.num_classes,
-        },
-        "model": {
-            "architecture": cfg.model.architecture,
-            "in_channels": cfg.model.in_channels,
-            "out_channels": cfg.model.out_channels,
-            "embedding_dim": cfg.model.embedding_dim,
-            "padding": cfg.model.padding,
-            "normalization": cfg.model.normalization,
-            "hidden_channels": cfg.model.hidden_channels,
-            "kernel_size": cfg.model.kernel_size,
-            "num_mid_layers": cfg.model.num_mid_layers,
-            "channel_mults": cfg.model.channel_mults,
-            "downsample": cfg.model.downsample,
-            "upsample": cfg.model.upsample,
-            "skip_connection": cfg.model.skip_connection,
-        },
-        "training": {
-            "epochs": cfg.training.epochs,
-            "batch_size": cfg.training.batch_size,
-            "optimizer": {
-                "name": cfg.training.optimizer.name,
-                "lr": cfg.training.optimizer.lr,
-                "weight_decay": cfg.training.optimizer.weight_decay,
-                "betas": cfg.training.optimizer.betas,
-                "eps": cfg.training.optimizer.eps,
-            },
-            "lr_schedule": {
-                "name": cfg.training.lr_schedule.name,
-                "halve_every_epochs": cfg.training.lr_schedule.halve_every_epochs,
-                "step_unit": cfg.training.lr_schedule.step_unit,
-            },
-        },
-        "diffusion": {
-            "prediction_type": cfg.diffusion.prediction_type,
-            "horizon": cfg.diffusion.horizon,
-            "noise_schedule": cfg.diffusion.noise_schedule,
-            "sampler": {
-                "name": cfg.diffusion.sampler.name,
-                "steps": cfg.diffusion.sampler.steps,
-                "eta": cfg.diffusion.sampler.eta,
-            },
-        },
-        "logging": {
-            "save_every_epochs": cfg.logging.save_every_epochs,
-            "sample_every_epochs": cfg.logging.sample_every_epochs,
-        },
-        "artifacts": {
-            "checkpoints_dir": cfg.artifacts.checkpoints_dir,
-            "samples_dir": cfg.artifacts.samples_dir,
-            "seeds_dir": cfg.artifacts.seeds_dir,
-        },
-    }
-
-
-def load_checkpoint_for_resume(
-    *,
-    path: str | Path,
-    device: torch.device,
-    backbone: torch.nn.Module,
-    diffusion: DDIMDiffusion,
-    optimizer: Adam,
-    scheduler: ExponentialLR,
-) -> tuple[int, int, float]:
-    ckpt = torch.load(path, map_location=device)
-
-    required_keys = [
-        "epoch",
-        "global_step",
-        "backbone_state_dict",
-        "diffusion_state_dict",
-        "optimizer_state_dict",
-        "scheduler_state_dict",
-    ]
-    missing = [k for k in required_keys if k not in ckpt]
-    if missing:
-        raise KeyError(f"Resume checkpoint is missing required keys: {missing}")
-
-    backbone.load_state_dict(ckpt["backbone_state_dict"])
-    diffusion.load_state_dict(ckpt["diffusion_state_dict"])
-    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-    scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-
-    last_epoch = int(ckpt["epoch"])
-    global_step = int(ckpt["global_step"])
-    last_loss = float(ckpt.get("last_loss", float("nan")))
-
-    return last_epoch, global_step, last_loss
-
+# ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
 
 def set_global_seed(seed: int) -> None:
     random.seed(seed)
@@ -181,16 +63,15 @@ def set_global_seed(seed: int) -> None:
 def configure_torch(cfg: FullConfig) -> torch.device:
     if cfg.experiment.device == "cuda":
         if not torch.cuda.is_available():
-            raise RuntimeError(
-                "Config requests CUDA but torch.cuda.is_available() is False."
-            )
+            raise RuntimeError("Config requests CUDA but torch.cuda.is_available() is False.")
         device = torch.device("cuda")
     elif cfg.experiment.device == "cpu":
         device = torch.device("cpu")
     else:
-        raise ValueError(f"Unsupported device in config: {cfg.experiment.device!r}")
+        raise ValueError(f"Unsupported device: {cfg.experiment.device!r}")
 
     if cfg.experiment.deterministic:
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
@@ -203,43 +84,35 @@ def configure_torch(cfg: FullConfig) -> torch.device:
     return device
 
 
-def save_json(path: str | Path, payload: dict) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, sort_keys=False)
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
 
+def build_dataloader(cfg: FullConfig, *, data_root: str, num_workers: int) -> tuple[DataLoader, int]:
+    """Returns (dataloader, factor) where factor accounts for dataset subsetting."""
+    name = cfg.dataset.name
+    image_size = cfg.dataset.image_size
+    channels = cfg.dataset.channels
 
-def build_mnist_dataloader(
-    cfg: FullConfig,
-    *,
-    data_root: str,
-    num_workers: int,
-) -> DataLoader:
-    if cfg.dataset.name != "mnist":
-        raise ValueError(
-            f"Step 5 trainer is intentionally restricted to MNIST first. "
-            f"Got dataset={cfg.dataset.name!r}."
-        )
-    if cfg.dataset.conditional:
-        raise ValueError("Step 5 trainer expects unconditional MNIST.")
-    if cfg.dataset.channels != 1:
-        raise ValueError(f"MNIST should have 1 channel, got {cfg.dataset.channels}")
-    if cfg.dataset.image_size != 28:
-        raise ValueError(f"MNIST should have image_size=28, got {cfg.dataset.image_size}")
+    norm = transforms.Normalize([0.5] * channels, [0.5] * channels)
+    transform = transforms.Compose([transforms.Resize(image_size), transforms.ToTensor(), norm])
 
-    transform = transforms.Compose(
-        [
-            transforms.ToTensor(),  # [0,1], shape [1,28,28]
-        ]
-    )
+    if name == "mnist":
+        dataset = tv_datasets.MNIST(root=data_root, train=True, download=True, transform=transform)
+    elif name == "cifar10":
+        dataset = tv_datasets.CIFAR10(root=data_root, train=True, download=True, transform=transform)
+    elif name == "fashion-mnist":
+        dataset = tv_datasets.FashionMNIST(root=data_root, train=True, download=True, transform=transform)
+    else:
+        raise ValueError(f"Unsupported dataset: {name!r}")
 
-    dataset = datasets.MNIST(
-        root=data_root,
-        train=True,
-        download=True,
-        transform=transform,
-    )
+    # Subset support: if maxsamps is set and smaller than the full dataset,
+    # truncate and record the factor by which epochs/save_interval should scale.
+    factor = 1
+    maxsamps = cfg.dataset.get("maxsamps", None) if hasattr(cfg.dataset, "get") else getattr(cfg.dataset, "maxsamps", None)
+    if maxsamps is not None and maxsamps < len(dataset):
+        factor = len(dataset) // maxsamps
+        dataset = torch.utils.data.Subset(dataset, list(range(maxsamps)))
 
     generator = torch.Generator()
     generator.manual_seed(cfg.experiment.seed)
@@ -253,27 +126,60 @@ def build_mnist_dataloader(
         drop_last=False,
         generator=generator,
     )
-    return loader
+    return loader, factor
 
 
-def build_backbone(cfg: FullConfig) -> torch.nn.Module:
-    if cfg.model.architecture == "resnet":
-        return MinimalResNet.from_config(cfg)
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
+
+def build_model(cfg: FullConfig) -> DDIM:
+    """Build backbone + wrap in DDIM, matching train_script_original behaviour."""
+    mult = getattr(cfg.model, "mult", 1)
+    layers = getattr(cfg.model, "layers", 3)
+    normal = None if getattr(cfg.model, "nonorm", True) else "GroupNorm"
+    padding_mode = cfg.model.padding
+
     if cfg.model.architecture == "unet":
-        return MinimalUNet.from_config(cfg)
-    raise ValueError(f"Unsupported architecture: {cfg.model.architecture!r}")
+        backbone = MinimalUNet(
+            channels=cfg.model.in_channels,
+            fchannels=[mult * 32 * (2 ** i) for i in range(layers)],
+            emb_dim=cfg.model.embedding_dim,
+            padding_mode=padding_mode,
+            conditional=cfg.dataset.conditional,
+            num_classes=cfg.dataset.num_classes,
+        )
+    elif cfg.model.architecture == "resnet":
+        backbone = MinimalResNet(
+            channels=cfg.model.in_channels,
+            emb_dim=128 * mult,
+            mode=padding_mode,
+            conditional=cfg.dataset.conditional,
+            num_classes=cfg.dataset.num_classes,
+            kernel_size=3,
+            num_layers=layers,
+            normalization=normal,
+            lastksize=3,
+        )
+    else:
+        raise ValueError(f"Unsupported architecture: {cfg.model.architecture!r}")
+
+    model = DDIM(
+        pretrained_backbone=backbone,
+        default_imsize=cfg.dataset.image_size,
+        in_channels=cfg.model.in_channels,
+        noise_schedule=cosine_noise_schedule,
+    )
+    return model
 
 
-def build_diffusion(cfg: FullConfig, backbone: torch.nn.Module) -> DDIMDiffusion:
-    return DDIMDiffusion.from_config(backbone=backbone, cfg=cfg)
-
+# ---------------------------------------------------------------------------
+# Optimizer & scheduler
+# ---------------------------------------------------------------------------
 
 def build_optimizer(cfg: FullConfig, model: torch.nn.Module) -> Adam:
     if cfg.training.optimizer.name != "adam":
-        raise ValueError(
-            f"Only Adam is supported right now, got {cfg.training.optimizer.name!r}"
-        )
-
+        raise ValueError(f"Only Adam is supported, got {cfg.training.optimizer.name!r}")
     return Adam(
         model.parameters(),
         lr=cfg.training.optimizer.lr,
@@ -283,13 +189,9 @@ def build_optimizer(cfg: FullConfig, model: torch.nn.Module) -> Adam:
     )
 
 
-def build_scheduler(cfg: FullConfig, optimizer: Adam) -> ExponentialLR:
+def build_scheduler(cfg: FullConfig, optimizer: Adam, factor: int = 1) -> ExponentialLR:
     if cfg.dataset.name not in DATASET_SIZES:
-        raise ValueError(
-            f"Unknown dataset '{cfg.dataset.name}'. "
-            f"Expected one of: {sorted(DATASET_SIZES.keys())}"
-        )
-
+        raise ValueError(f"Unknown dataset {cfg.dataset.name!r}. Expected one of {sorted(DATASET_SIZES)}")
     gamma = compute_per_step_gamma(
         dataset_size=DATASET_SIZES[cfg.dataset.name],
         batch_size=cfg.training.batch_size,
@@ -298,100 +200,28 @@ def build_scheduler(cfg: FullConfig, optimizer: Adam) -> ExponentialLR:
     return ExponentialLR(optimizer, gamma=gamma)
 
 
-def sample_timesteps(
-    batch_size: int,
-    horizon: int,
-    *,
-    device: torch.device,
-) -> torch.Tensor:
-    # Uniform over {0, ..., T-1}
-    return torch.randint(
-        low=0,
-        high=horizon,
-        size=(batch_size,),
-        device=device,
-        dtype=torch.long,
-    )
-
-
-def normalize_images_to_model_range(x: torch.Tensor) -> torch.Tensor:
-    # torchvision ToTensor() gives [0,1]. Diffusion model typically trains in [-1,1].
-    return x * 2.0 - 1.0
-
-
-def denormalize_model_range_to_image(x: torch.Tensor) -> torch.Tensor:
-    return ((x.clamp(-1.0, 1.0) + 1.0) * 0.5).clamp(0.0, 1.0)
-
-
-def _make_grayscale_grid(samples: torch.Tensor, nrow: int = 4) -> np.ndarray:
-    """
-    samples: [B,1,H,W] in [0,1]
-    returns: uint8 image array [H_grid, W_grid]
-    """
-    if samples.ndim != 4 or samples.shape[1] != 1:
-        raise ValueError(f"Expected samples with shape [B,1,H,W], got {tuple(samples.shape)}")
-
-    samples = samples.detach().cpu()
-    b, _, h, w = samples.shape
-    ncol = int(np.ceil(b / nrow))
-
-    grid = torch.zeros((ncol * h, nrow * w), dtype=torch.float32)
-
-    for idx in range(b):
-        row = idx // nrow
-        col = idx % nrow
-        grid[row * h : (row + 1) * h, col * w : (col + 1) * w] = samples[idx, 0]
-
-    grid_np = (grid.numpy() * 255.0).round().astype(np.uint8)
-    return grid_np
-
-
-@torch.no_grad()
-def save_sample_grid(
-    diffusion: DDIMDiffusion,
-    *,
-    batch_size: int,
-    sample_seed: int,
-    out_path: str | Path,
-    device: torch.device,
-) -> None:
-    samples = diffusion.sample(
-        batch_size=batch_size,
-        nsteps=diffusion.default_sampling_steps,
-        seed=sample_seed,
-        labels=None,
-        device=device,
-    )
-    samples = denormalize_model_range_to_image(samples)
-    grid = _make_grayscale_grid(samples, nrow=4)
-    img = Image.fromarray(grid, mode="L")
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    img.save(out_path)
-
+# ---------------------------------------------------------------------------
+# Checkpointing & logging
+# ---------------------------------------------------------------------------
 
 def save_checkpoint(
     *,
-    path: str | Path,
+    path: Path,
     epoch: int,
     global_step: int,
     cfg: FullConfig,
-    backbone: torch.nn.Module,
-    diffusion: DDIMDiffusion,
+    model: torch.nn.Module,
     optimizer: Adam,
     scheduler: ExponentialLR,
     last_loss: float,
 ) -> None:
-    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-
     torch.save(
         {
             "epoch": epoch,
             "global_step": global_step,
             "cfg": asdict(cfg) if is_dataclass(cfg) else cfg,
-            "backbone_state_dict": backbone.state_dict(),
-            "diffusion_state_dict": diffusion.state_dict(),
+            "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
             "last_loss": last_loss,
@@ -400,217 +230,191 @@ def save_checkpoint(
     )
 
 
+def load_checkpoint(
+    *,
+    path: Path,
+    device: torch.device,
+    model: torch.nn.Module,
+    optimizer: Adam,
+    scheduler: ExponentialLR,
+) -> tuple[int, int, float]:
+    ckpt = torch.load(path, map_location=device)
+    missing = [k for k in ("epoch", "global_step", "model_state_dict", "optimizer_state_dict", "scheduler_state_dict") if k not in ckpt]
+    if missing:
+        raise KeyError(f"Checkpoint missing keys: {missing}")
+    model.load_state_dict(ckpt["model_state_dict"])
+    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+    return int(ckpt["epoch"]), int(ckpt["global_step"]), float(ckpt.get("last_loss", float("nan")))
+
+
+def save_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def save_samples(
+    *,
+    path: Path,
+    model: DDIM,
+    cfg: FullConfig,
+    device: torch.device,
+    n_samples: int = 16,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    label = None
+    if cfg.dataset.conditional:
+        label = torch.arange(n_samples, device=device) % cfg.dataset.num_classes
+    with torch.no_grad():
+        samples = model.sample(
+            batch_size=n_samples,
+            label=label,
+            nsteps=cfg.diffusion.sampler.steps,
+        )
+    model.train()
+    samples = (samples * 0.5 + 0.5).clamp(0, 1)
+    nrow = int(n_samples ** 0.5)
+    tv_utils.save_image(samples, path, nrow=nrow)
+    print(f"Saved samples    : {path}")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main() -> None:
     args = parse_args()
-
     cfg = load_config(args.config)
-    ensure_artifact_dirs(cfg)
+    run_id = make_run_id(args.config)
+
+    checkpoints_dir = Path(cfg.artifacts.checkpoints_dir)
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
     set_global_seed(cfg.experiment.seed)
     device = configure_torch(cfg)
 
-    dataloader = build_mnist_dataloader(
-        cfg,
-        data_root=args.data_root,
-        num_workers=args.num_workers,
-    )
+    print(f"Run ID    : {run_id}")
+    print(f"Config    : {args.config}")
+    print(f"Model     : {cfg.model.architecture} | Dataset: {cfg.dataset.name} | Device: {device}")
+    print(f"Training  : {cfg.training.epochs} epochs, batch {cfg.training.batch_size}")
 
-    backbone = build_backbone(cfg).to(device)
-    diffusion = build_diffusion(cfg, backbone).to(device)
+    dataloader, factor = build_dataloader(cfg, data_root=args.data_root, num_workers=args.num_workers)
+    if factor > 1:
+        print(f"Subset    : dataset reduced, epoch/save_interval factor = {factor}")
 
-    optimizer = build_optimizer(cfg, diffusion)
-    scheduler = build_scheduler(cfg, optimizer)
+    # Scale epochs and save interval by factor (matches train_script_original subset behaviour)
+    total_epochs = cfg.training.epochs * factor
+    save_every = cfg.logging.save_every_epochs * factor
+    sample_every = cfg.logging.sample_every_epochs * factor
 
-    dataset_size = DATASET_SIZES[cfg.dataset.name]
-    steps_per_epoch = (dataset_size + cfg.training.batch_size - 1) // cfg.training.batch_size
-    derived_gamma = compute_per_step_gamma(
-        dataset_size=dataset_size,
-        batch_size=cfg.training.batch_size,
-        halve_every_epochs=cfg.training.lr_schedule.halve_every_epochs,
-    )
+    model = build_model(cfg).to(device)
+    optimizer = build_optimizer(cfg, model)
+    scheduler = build_scheduler(cfg, optimizer, factor=factor)
 
-    print("=" * 80)
-    print("STEP 5 TRAINING START")
-    print("=" * 80)
-    print()
-    print("Resolved configuration:")
-    print(pformat(summarize_config(cfg), sort_dicts=False))
-    print()
-    print("Derived quantities:")
-    print(f"  dataset_size            : {dataset_size}")
-    print(f"  steps_per_epoch         : {steps_per_epoch}")
-    print(f"  lr_half_life_epochs     : {cfg.training.lr_schedule.halve_every_epochs}")
-    print(f"  derived_step_gamma      : {derived_gamma:.12f}")
-    print(f"  device                  : {device}")
-    print()
-
-    run_name = Path(args.config).stem
-
-    save_json(
-        Path(cfg.artifacts.checkpoints_dir) / f"{run_name}_resolved_config.json",
-        summarize_config(cfg),
-    )
-
-    try:
-        shutil.copy2(args.config, Path(cfg.artifacts.checkpoints_dir) / f"{run_name}_source_config.yaml")
-    except Exception:
-        pass
-
-    sample_seed = cfg.experiment.seed
-    save_json(
-        Path(cfg.artifacts.seeds_dir) / f"{run_name}_sample_seed.json",
-        {
-            "run_name": run_name,
-            "sample_seed": sample_seed,
-            "conditional": False,
-            "labels": None,
-            "sampling_steps": cfg.diffusion.sampler.steps,
-        },
-    )
-
-    diffusion.train()
+    start_epoch = 1
     global_step = 0
     last_loss = float("nan")
-    start_epoch = 1
+    loss_log: list[dict] = []
 
     if args.resume is not None:
         resume_path = Path(args.resume)
         if not resume_path.exists():
             raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
-
-        resumed_epoch, global_step, last_loss = load_checkpoint_for_resume(
+        resumed_epoch, global_step, last_loss = load_checkpoint(
             path=resume_path,
             device=device,
-            backbone=backbone,
-            diffusion=diffusion,
+            model=model,
             optimizer=optimizer,
             scheduler=scheduler,
         )
         start_epoch = resumed_epoch + 1
+        print(f"Resumed   : epoch {resumed_epoch}, step {global_step}, loss {last_loss:.6f}")
 
-        print()
-        print("=" * 80)
-        print("RESUMED TRAINING")
-        print("=" * 80)
-        print(f"Checkpoint path        : {resume_path}")
-        print(f"Resumed from epoch     : {resumed_epoch}")
-        print(f"Next epoch to run      : {start_epoch}")
-        print(f"Resumed global_step    : {global_step}")
-        print(f"Resumed last_loss      : {last_loss:.6f}")
-        print(f"Resumed scheduler lr   : {scheduler.get_last_lr()[0]:.8e}")
-        print()
-
-    if start_epoch > cfg.training.epochs:
-        print(
-            f"Checkpoint already reached/passed configured training length "
-            f"(start_epoch={start_epoch}, total_epochs={cfg.training.epochs})."
-        )
+    if start_epoch > total_epochs:
+        print("Already completed all configured epochs.")
         return
 
-    for epoch in range(start_epoch, cfg.training.epochs + 1):
+    model.train()
+    for epoch in range(start_epoch, total_epochs + 1):
         epoch_loss_sum = 0.0
         epoch_items = 0
 
-        for batch_idx, (images, _) in enumerate(dataloader, start=1):
+        for batch_idx, (images, labels) in enumerate(dataloader, start=1):
             images = images.to(device, non_blocking=True)
-            x0 = normalize_images_to_model_range(images)
+            labels = labels.to(device, non_blocking=True)
 
-            bsz = x0.shape[0]
-            t = sample_timesteps(
-                batch_size=bsz,
-                horizon=cfg.diffusion.horizon,
-                device=device,
-            )
-            noise = torch.randn_like(x0)
-            x_t = diffusion.q_sample(x0, t, noise=noise)
+            bsz = images.shape[0]
+            t = torch.randint(0, cfg.diffusion.horizon, (bsz,), device=device).float() / cfg.diffusion.horizon
+            noise = torch.randn_like(images)
+            beta = cosine_noise_schedule(t)
+            x_t = (1.0 - beta).sqrt()[:, None, None, None] * images + beta.sqrt()[:, None, None, None] * noise
 
             optimizer.zero_grad(set_to_none=True)
 
-            pred_noise = diffusion(x_t, t, labels=None)
-            loss = F.mse_loss(pred_noise, noise)
+            # Match train__original.py: pass label only when conditional
+            if cfg.dataset.conditional:
+                pred_noise = model(t, x_t, label=labels)
+            else:
+                pred_noise = model(t, x_t)
 
+            loss = F.mse_loss(pred_noise, noise)
             loss.backward()
             optimizer.step()
             scheduler.step()
 
             last_loss = float(loss.item())
-            epoch_loss_sum += float(loss.item()) * bsz
+            epoch_loss_sum += last_loss * bsz
             epoch_items += bsz
             global_step += 1
 
             if batch_idx % 100 == 0 or batch_idx == len(dataloader):
-                current_lr = scheduler.get_last_lr()[0]
+                lr = scheduler.get_last_lr()[0]
                 print(
-                    f"[epoch {epoch:03d}/{cfg.training.epochs:03d}] "
-                    f"[batch {batch_idx:04d}/{len(dataloader):04d}] "
-                    f"loss={loss.item():.6f} "
-                    f"lr={current_lr:.8e}"
+                    f"[epoch {epoch:03d}/{total_epochs:03d}]"
+                    f"[batch {batch_idx:04d}/{len(dataloader):04d}]"
+                    f" loss={last_loss:.6f} lr={lr:.3e}"
                 )
 
         epoch_avg_loss = epoch_loss_sum / max(epoch_items, 1)
-        print(
-            f"Epoch {epoch:03d} complete | "
-            f"avg_loss={epoch_avg_loss:.6f} | "
-            f"last_loss={last_loss:.6f}"
-        )
+        loss_log.append({"epoch": epoch, "avg_loss": epoch_avg_loss, "last_loss": last_loss})
+        print(f"Epoch {epoch:03d} complete | avg_loss={epoch_avg_loss:.6f}")
 
-        if (epoch % cfg.logging.save_every_epochs == 0) or (epoch == cfg.training.epochs):
-            ckpt_path = Path(cfg.artifacts.checkpoints_dir) / f"{run_name}_epoch_{epoch:03d}.pt"
+        if epoch % sample_every == 0 or epoch == total_epochs:
+            sample_path = Path(cfg.artifacts.samples_dir) / f"{run_id}_epoch_{epoch:03d}.png"
+            save_samples(path=sample_path, model=model, cfg=cfg, device=device)
+
+        if epoch % save_every == 0 or epoch == total_epochs:
+            ckpt_path = checkpoints_dir / f"{run_id}_epoch_{epoch:03d}.pt"
             save_checkpoint(
                 path=ckpt_path,
                 epoch=epoch,
                 global_step=global_step,
                 cfg=cfg,
-                backbone=backbone,
-                diffusion=diffusion,
+                model=model,
                 optimizer=optimizer,
                 scheduler=scheduler,
                 last_loss=last_loss,
             )
-            print(f"Saved checkpoint: {ckpt_path}")
+            print(f"Saved checkpoint : {ckpt_path}")
 
-        if (epoch % cfg.logging.sample_every_epochs == 0) or (epoch == cfg.training.epochs):
-            diffusion.eval()
-            sample_path = Path(cfg.artifacts.samples_dir) / f"{run_name}_epoch_{epoch:03d}.png"
-            save_sample_grid(
-                diffusion,
-                batch_size=16,
-                sample_seed=sample_seed,
-                out_path=sample_path,
-                device=device,
-            )
-            print(f"Saved sample grid: {sample_path}")
-            diffusion.train()
+    loss_log_path = checkpoints_dir / f"{run_id}_loss_log.json"
+    save_json(loss_log_path, loss_log)
+    print(f"Saved loss log   : {loss_log_path}")
 
-    final_ckpt = Path(cfg.artifacts.checkpoints_dir) / f"{run_name}_final.pt"
+    final_ckpt = checkpoints_dir / f"{run_id}_final.pt"
     save_checkpoint(
         path=final_ckpt,
-        epoch=cfg.training.epochs,
+        epoch=total_epochs,
         global_step=global_step,
         cfg=cfg,
-        backbone=backbone,
-        diffusion=diffusion,
+        model=model,
         optimizer=optimizer,
         scheduler=scheduler,
         last_loss=last_loss,
     )
-    print(f"Saved final checkpoint: {final_ckpt}")
-
-    diffusion.eval()
-    final_sample_path = Path(cfg.artifacts.samples_dir) / f"{run_name}_final.png"
-    save_sample_grid(
-        diffusion,
-        batch_size=16,
-        sample_seed=sample_seed,
-        out_path=final_sample_path,
-        device=device,
-    )
-    print(f"Saved final sample grid: {final_sample_path}")
-
-    print()
-    print("=" * 80)
-    print("STEP 5 TRAINING COMPLETE")
-    print("=" * 80)
+    print(f"Saved final ckpt : {final_ckpt}")
+    print("Training complete.")
 
 
 if __name__ == "__main__":
