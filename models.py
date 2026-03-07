@@ -96,7 +96,7 @@ class MinimalResNet(nn.Module):
 
         self.embedding = EmbeddingModule(emb_dim=hidden_channels, conditional=conditional, num_classes=num_classes)
 
-        downscale_padding = int(((default_imsize // 2 - 1) * 2 + k - default_imsize) / 2)
+        downscale_padding = (k - 1) // 2
         self.downscaling_layer = nn.Conv2d(in_channels=channels, out_channels=hidden_channels, kernel_size=k, stride=2, padding=downscale_padding, padding_mode=padding_mode)
 
         self.intermediate_layers = nn.ModuleList()
