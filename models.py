@@ -79,61 +79,43 @@ class EmbeddingModule(nn.Module):
         return emb
     
 class MinimalResNet(nn.Module):
+    def __init__(self,
+                 default_imsize,
+                 k=3,
+                 n_mid_layers=6,
+                 residual=True,
+                 hidden_channels=256,
+                 padding_mode='zeros',
+                 channels=3,
+                 conditional=False,
+                 num_classes=None):
+        super().__init__()
 
-	def __init__(self, channels=3,
-						emb_dim=128,
-						mode='circular',
-						normalization=None,
-						conditional=False,
-						num_classes=None,
-						kernel_size=3,
-						num_layers=6,
-						lastksize=1,
-						add_one=True):
+        self.residual = residual
+        self.conditional = conditional
 
-		super().__init__()
-		self.channels = channels
-		self.emb_dim = emb_dim
-		self.mode = mode
-		self.conditional = conditional
-		self.num_layers = num_layers
-		self.num_classes = num_classes
-		self.normalization = normalization
-		self.lastksize = lastksize
+        self.embedding = EmbeddingModule(emb_dim=hidden_channels, conditional=conditional, num_classes=num_classes)
 
-		self.embedding = EmbeddingModule(emb_dim=emb_dim, conditional=conditional, num_classes=num_classes)
+        downscale_padding = int(((default_imsize // 2 - 1) * 2 + k - default_imsize) / 2)
+        self.downscaling_layer = nn.Conv2d(in_channels=channels, out_channels=hidden_channels, kernel_size=k, stride=2, padding=downscale_padding, padding_mode=padding_mode)
 
-		self.up_projection = nn.Conv2d(channels, emb_dim, kernel_size, padding='same', padding_mode=mode)
+        self.intermediate_layers = nn.ModuleList()
+        for i in range(0, n_mid_layers):
+            conv_layer = nn.Conv2d(in_channels=hidden_channels, out_channels=hidden_channels, kernel_size=k, padding='same', padding_mode=padding_mode)
+            self.intermediate_layers.append(conv_layer)
 
-		if add_one:
-			self.embs = nn.ModuleList([nn.Sequential(nn.Linear(emb_dim, emb_dim), nn.GroupNorm(8,emb_dim), nn.ReLU()) for i in range(num_layers+1)])
-		else:
-			self.embs = nn.ModuleList([nn.Sequential(nn.Linear(emb_dim, emb_dim), nn.GroupNorm(8,emb_dim), nn.ReLU()) for i in range(num_layers)])
+        upscale_padding = downscale_padding
+        output_padding = default_imsize - ((default_imsize // 2 - 1) * 2 - 2 * upscale_padding + k)
+        self.upscaling_layer = nn.ConvTranspose2d(in_channels=hidden_channels, out_channels=channels, kernel_size=k, stride=2, padding=upscale_padding, output_padding=output_padding)
 
+    def forward(self, t, x, label=None):
+        embedding_vec = self.embedding(t, label)[:, :, None, None]
 
-		if normalization is None:
-			self.convs = nn.ModuleList([nn.Sequential(nn.Conv2d(emb_dim, emb_dim, kernel_size, padding='same', padding_mode=mode), nn.ReLU()) for i in range(num_layers)])
-		else:
-			self.convs = nn.ModuleList([nn.Sequential(nn.Conv2d(emb_dim, emb_dim, kernel_size, padding='same', padding_mode=mode), nn.GroupNorm(8,emb_dim), nn.ReLU()) for i in range(num_layers)])
-
-		if normalization is None:
-			self.down_projection = nn.Conv2d(emb_dim, channels, lastksize, padding='same', padding_mode=mode)
-		else:
-			self.down_projection = nn.Sequential(nn.GroupNorm(8,emb_dim), nn.Conv2d(emb_dim, channels, lastksize, padding='same', padding_mode=mode))
-
-	def forward(self, t, x, label=None):
-
-		embedding_vec = self.embedding(t,label=label)
-		state = self.up_projection(x)
-
-		for i in range(self.num_layers):
-			delta = self.convs[i](state + self.embs[i](embedding_vec)[:,:,None,None])
-			state = state + delta
-
-		delta = self.embs[-1](embedding_vec)[:,:,None,None] if len(self.embs) > self.num_layers else state
-		nextstate = state + delta
-
-		return self.down_projection(nextstate)
+        x = self.downscaling_layer(x)
+        for resblock in self.intermediate_layers:
+            x = x + resblock(x) + embedding_vec
+        x = self.upscaling_layer(x)
+        return x
 
 class MinimalUNet(nn.Module):
     def __init__(self,
@@ -169,11 +151,11 @@ class MinimalUNet(nn.Module):
             in_channels = fchannels[i]
             out_channels = fchannels[i-1]
             self.upsample_blocks.append(nn.ConvTranspose2d(in_channels=in_channels, out_channels=out_channels, kernel_size=2, stride=2))
-            # 2x in_channels due to concatenation of the skip connection from the corresponding encoder block along the channel axis.
+            # 2x out_channels due to concatenation of the skip connection from the corresponding encoder block along the channel axis.
             self.decoder_blocks.append(UBlock(in_features=2 * out_channels, out_features=out_channels, k=k, padding_mode=padding_mode, depth=ublock_depth, emb_dim=emb_dim))
 
         self.last_emb = nn.Sequential(nn.ReLU(), nn.Linear(emb_dim, fchannels[0]))
-        self.output_conv = nn.Conv2d(in_channels=fchannels[0], out_channels=channels, kernel_size=1, padding='same', padding_mode=padding_mode)
+        self.output_conv = nn.Conv2d(in_channels=fchannels[0], out_channels=channels, kernel_size=k, padding='same', padding_mode=padding_mode)
 
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
