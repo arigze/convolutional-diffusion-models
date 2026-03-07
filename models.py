@@ -18,19 +18,19 @@ class DDIM(nn.Module):
         self.default_imsize = default_imsize
         self.noise_schedule = noise_schedule
         if pretrained_backbone is not None:
-            self.backbone = self.pretrained_backbone
+            self.backbone = pretrained_backbone
         else:
             self.backbone = backbone
 
     def forward(self, t, x, label=None):
-        self.backbone(t, x, label)
+        return self.backbone(t, x, label)
 
     def sample(self, batch_size=1, x=None, label=None, nsteps=20, device=None, breakstep=-1):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.eval()
         self.backbone.eval()
         if x is None:
-            x = torch.normal(0, 1, (batch_size, self.in_channels, self.default_imsize, self.default_imsize))
+            x = torch.normal(0, 1, (batch_size, self.in_channels, self.default_imsize, self.default_imsize), device=device)
 
         for i in range(nsteps, 0, -1):
             if i == breakstep:
@@ -41,7 +41,7 @@ class DDIM(nn.Module):
             score = self(t, x, label)
 
             alpha_t = 1 - beta_t
-            beta_t_prev = self.noise_schedule(1 - 1/nsteps)
+            beta_t_prev = self.noise_schedule(t - 1/nsteps)
             alpha_t_prev = 1 - beta_t_prev
 
             x *= torch.sqrt(alpha_t_prev/alpha_t)[:, None, None, None]
@@ -55,6 +55,7 @@ class EmbeddingModule(nn.Module):
         super().__init__()
 
         self.emb_dim = emb_dim
+        self.conditional = conditional
         if conditional:
             self.class_embeddings = nn.Embedding(num_classes, emb_dim)
         
