@@ -149,9 +149,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--is",  dest="ideal_score",             action="store_true", help="Sample IdealScoreMachine")
     parser.add_argument("--ls",  dest="local_score",             action="store_true", help="Sample LocalScoreMachine")
     parser.add_argument("--els", dest="equivariant_local_score", action="store_true", help="Sample EquivariantLocalScoreMachine")
-    parser.add_argument("--seed",      type=int, required=True,  help="Seed for shared initial noise")
-    parser.add_argument("--timesteps", type=int, default=100,    help="Discrete timesteps for score machines (default: 100)")
-    parser.add_argument("--nsteps",    type=int, default=20,     help="DDIM sampling steps for neural models (default: 20)")
+    parser.add_argument("--seed",         type=int, required=True,  help="Seed for shared initial noise")
+    parser.add_argument("--machine-steps", type=int, default=20,     help="Sampling steps shared across all models and score machines (default: 20)")
+    parser.add_argument("--ddim-steps",   type=int, default=None,   help="DDIM sampling steps for neural models; overrides --machine-steps if set")
     return parser.parse_args()
 
 
@@ -185,8 +185,9 @@ def main() -> None:
         print(f"\n[{model_type.upper()} {model_id}]")
         model = load_ddim(args.dataset, model_type, model_id, device)
         x_in = x0.unsqueeze(0).to(device)  # [1, C, H, W]
+        ddim_steps = args.ddim_steps if args.ddim_steps is not None else args.machine_steps
         with torch.no_grad():
-            sample = model.sample(batch_size=1, x=x_in, nsteps=args.nsteps, device=device)
+            sample = model.sample(batch_size=1, x=x_in, nsteps=ddim_steps, device=device)
         save_sample(sample.squeeze(0).cpu(), out_dir, f"{model_type}_{model_id}")
 
     # ------------------------------------------------------------------
@@ -207,7 +208,7 @@ def main() -> None:
 
         for name, SMClass in score_machines:
             print(f"\n[{name}]")
-            sm = SMClass(discrete_cosine_schedule, dataset, 256, args.timesteps)
+            sm = SMClass(discrete_cosine_schedule, dataset, 256, args.machine_steps)
             with torch.no_grad():
                 sample = sm.sample(x0.clone(), device=device)
             save_sample(sample.cpu(), out_dir, name)
