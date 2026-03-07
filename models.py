@@ -62,7 +62,7 @@ class EmbeddingModule(nn.Module):
     def forward(self, t, label=None):
         d = self.emb_dim // 2
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        targ = t[:, None] / (10000 ** (torch.arange(d, device=device)) / (d - 1))[None, :]
+        targ = t[:,None] / (10000**(torch.arange(d) / (d-1)))[None,:]
         emb = torch.cat((torch.sin(targ), torch.cos(targ)), dim=1)
 
         if self.conditional:
@@ -93,7 +93,7 @@ class MinimalResNet(nn.Module):
 		self.normalization = normalization
 		self.lastksize = lastksize
 
-		self.embedding = EmbeddingModule(emb_dim, channels, conditional=conditional, num_classes=num_classes)
+		self.embedding = EmbeddingModule(emb_dim=emb_dim, conditional=conditional=conditional, num_classes=num_classes)
 
 		self.up_projection = nn.Conv2d(channels, emb_dim, kernel_size, padding='same', padding_mode=mode)
 
