@@ -155,23 +155,31 @@ class MinimalUNet(nn.Module):
     Minimal three-scale UNet for the paper's CNN diffusion experiments.
 
     Structure:
-        enc1: UBlock(c1)
+        enc1: UBlock(in  -> c1)           [H,   W  ]  -> skip1
         maxpool
-        enc2: UBlock(c2)
+        enc2: UBlock(c1  -> c2)           [H/2, W/2]  -> skip2
         maxpool
-        enc3: UBlock(c3)
-        bottleneck: UBlock(c3)
-        up2: transpose conv, concat skip, UBlock(c2)
-        up1: transpose conv, concat skip, UBlock(c1)
-        final 3x3 conv -> out_channels
+        enc3: UBlock(c2  -> c3)           [H/4, W/4]  -> skip3
+        bottleneck: UBlock(c3 -> c3)      [H/4, W/4]
+        up3: concat(bottleneck, skip3), UBlock(2*c3 -> c3)  [H/4, W/4]
+        upconv2: ConvTranspose c3 -> c2   [H/2, W/2]
+        up2: concat(up3_out, skip2), UBlock(2*c2 -> c2)     [H/2, W/2]
+        upconv1: ConvTranspose c2 -> c1   [H,   W  ]
+        up1: concat(up2_out, skip1), UBlock(2*c1 -> c1)     [H,   W  ]
+        final 3x3 conv c1 -> out_channels
+
+    Note: enc3 and bottleneck share the same spatial resolution — there is
+    no third maxpool. This correctly handles non-power-of-2 image sizes
+    (e.g. MNIST 28x28 where 28->14->7 is fine, but 7->3 is lossy and
+    produces a 6-pixel mismatch on the transpose conv back up).
 
     Design:
         - residualized blocks
         - timestep/class embedding injected into every block
         - no normalization
-        - maxpool downsampling
-        - transpose-conv upsampling
-        - skip connections via concatenation
+        - maxpool downsampling (x2 downsamples)
+        - transpose-conv upsampling (x2 upsamples)
+        - skip connections via concatenation at all three encoder scales
         - zero or circular padding
     """
 
@@ -216,6 +224,7 @@ class MinimalUNet(nn.Module):
 
         self.downsample = nn.MaxPool2d(kernel_size=2, stride=2)
 
+        # ── Encoder ──────────────────────────────────────────────────────────
         self.enc1 = ResidualUBlock(
             in_channels=in_channels,
             out_channels=c1,
@@ -237,8 +246,24 @@ class MinimalUNet(nn.Module):
             padding=padding,
             residual=residual,
         )
+
+        # ── Bottleneck ────────────────────────────────────────────────────────
         self.bottleneck = ResidualUBlock(
             in_channels=c3,
+            out_channels=c3,
+            embedding_dim=embedding_dim,
+            padding=padding,
+            residual=residual,
+        )
+
+        # ── Decoder ───────────────────────────────────────────────────────────
+        # up3 merges the bottleneck output with the enc3 skip at the same
+        # spatial resolution — no transpose conv at this scale.
+        # Previously this block was missing entirely; enc3's features were
+        # computed but never used anywhere in the decoder.
+        self.up3 = UpBlock(
+            in_channels=c3,
+            skip_channels=c3,
             out_channels=c3,
             embedding_dim=embedding_dim,
             padding=padding,
@@ -248,7 +273,7 @@ class MinimalUNet(nn.Module):
         self.upconv2 = nn.ConvTranspose2d(c3, c2, kernel_size=2, stride=2)
         self.up2 = UpBlock(
             in_channels=c2,
-            skip_channels=c3,
+            skip_channels=c2,
             out_channels=c2,
             embedding_dim=embedding_dim,
             padding=padding,
@@ -330,19 +355,28 @@ class MinimalUNet(nn.Module):
         t = _normalize_timesteps(t, batch_size=batch_size, device=device)
         emb = self.embedding(timesteps=t, labels=labels)
 
-        skip1 = self.enc1(x_t, emb)
-        h = self.downsample(skip1)
+        # ── Encoder ──────────────────────────────────────────────────────────
+        skip1 = self.enc1(x_t, emb)       # [B, c1, H,   W  ]
+        h = self.downsample(skip1)         # [B, c1, H/2, W/2]
 
-        skip2 = self.enc2(h, emb)
-        h = self.downsample(skip2)
+        skip2 = self.enc2(h, emb)          # [B, c2, H/2, W/2]
+        h = self.downsample(skip2)         # [B, c2, H/4, W/4]
 
-        skip3 = self.enc3(h, emb)
-        h = self.bottleneck(skip3, emb)
-        h = self.upconv2(h)
-        h = self.up2(h, skip3, emb)
+        skip3 = self.enc3(h, emb)          # [B, c3, H/4, W/4]  ← FIX: saved as skip
 
-        h = self.upconv1(h)
-        h = self.up1(h, skip1, emb)
+        # ── Bottleneck ────────────────────────────────────────────────────────
+        h = self.bottleneck(skip3, emb)    # [B, c3, H/4, W/4]
+
+        # ── Decoder ───────────────────────────────────────────────────────────
+        # FIX: up3 now uses the enc3 skip at the same spatial resolution.
+        # Previously enc3 output was silently discarded.
+        h = self.up3(h, skip3, emb)        # [B, c3, H/4, W/4]
+
+        h = self.upconv2(h)                # [B, c2, H/2, W/2]
+        h = self.up2(h, skip2, emb)        # [B, c2, H/2, W/2]
+
+        h = self.upconv1(h)                # [B, c1, H,   W  ]
+        h = self.up1(h, skip1, emb)        # [B, c1, H,   W  ]
 
         out = self.final_conv(h)
         expected_shape = x_t.shape[:1] + (self.out_channels,) + x_t.shape[2:]
