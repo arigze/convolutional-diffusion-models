@@ -142,7 +142,7 @@ def build_model(cfg: FullConfig) -> DDIM:
     if cfg.model.architecture == "unet":
         backbone = MinimalUNet(
             channels=cfg.model.in_channels,
-            fchannels=[mult * 32 * (2 ** i) for i in range(layers)],
+            fchannels=cfg.model.fchannels,
             emb_dim=cfg.model.embedding_dim,
             padding_mode=padding_mode,
             conditional=cfg.dataset.conditional,
@@ -153,7 +153,7 @@ def build_model(cfg: FullConfig) -> DDIM:
             default_imsize=cfg.dataset.image_size,
             k=3,
             n_mid_layers=layers,
-            hidden_channels=128 * mult,
+            hidden_channels=cfg.model.hidden_channels,
             padding_mode=padding_mode,
             channels=cfg.model.in_channels,
             conditional=cfg.dataset.conditional,
@@ -290,6 +290,11 @@ def main() -> None:
     samples_dir = Path(cfg.artifacts.samples_dir) / run_id
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     samples_dir.mkdir(parents=True, exist_ok=True)
+
+    configs_dir = Path(cfg.artifacts.checkpoints_dir).parent / "configs"
+    config_path = configs_dir / f"{run_id}.json"
+    save_json(config_path, asdict(cfg))
+    print(f"Saved config     : {config_path}")
 
     set_global_seed(cfg.experiment.seed)
     device = configure_torch(cfg)
