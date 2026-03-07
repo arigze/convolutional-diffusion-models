@@ -70,8 +70,62 @@ class EmbeddingModule(nn.Module):
 
         return emb
     
-class MinimalResnet:
-    pass
+class MinimalResNet(nn.Module):
+
+	def __init__(self, channels=3,
+						emb_dim=128,
+						mode='circular',
+						normalization=None,
+						conditional=False,
+						num_classes=None,
+						kernel_size=3,
+						num_layers=6,
+						lastksize=1,
+						add_one=True):
+
+		super().__init__()
+		self.channels = channels
+		self.emb_dim = emb_dim
+		self.mode = mode
+		self.conditional = conditional
+		self.num_layers = num_layers
+		self.num_classes = num_classes
+		self.normalization = normalization
+		self.lastksize = lastksize
+
+		self.embedding = EmbeddingModule(emb_dim, channels, conditional=conditional, num_classes=num_classes)
+
+		self.up_projection = nn.Conv2d(channels, emb_dim, kernel_size, padding='same', padding_mode=mode)
+
+		if add_one:
+			self.embs = nn.ModuleList([nn.Sequential(nn.Linear(emb_dim, emb_dim), nn.GroupNorm(8,emb_dim), nn.ReLU()) for i in range(num_layers+1)])
+		else:
+			self.embs = nn.ModuleList([nn.Sequential(nn.Linear(emb_dim, emb_dim), nn.GroupNorm(8,emb_dim), nn.ReLU()) for i in range(num_layers)])
+
+
+		if normalization is None:
+			self.convs = nn.ModuleList([nn.Sequential(nn.Conv2d(emb_dim, emb_dim, kernel_size, padding='same', padding_mode=mode), nn.ReLU()) for i in range(num_layers)])
+		else:
+			self.convs = nn.ModuleList([nn.Sequential(nn.Conv2d(emb_dim, emb_dim, kernel_size, padding='same', padding_mode=mode), nn.GroupNorm(8,emb_dim), nn.ReLU()) for i in range(num_layers)])
+
+		if normalization is None:
+			self.down_projection = nn.Conv2d(emb_dim, channels, lastksize, padding='same', padding_mode=mode)
+		else:
+			self.down_projection = nn.Sequential(nn.GroupNorm(8,emb_dim), nn.Conv2d(emb_dim, channels, lastksize, padding='same', padding_mode=mode))
+
+	def forward(self, t, x, label=None):
+
+		embedding_vec = self.embedding(t,label=label)
+		state = self.up_projection(x)
+
+		for i in range(self.num_layers):
+			delta = self.convs[i](state + self.embs[i](embedding_vec)[:,:,None,None])
+			state = state + delta
+
+		delta = self.embs[-1](embedding_vec)[:,:,None,None] if len(self.embs) > self.num_layers else state
+		nextstate = state + delta
+
+		return self.down_projection(nextstate)
 
 class MinimalUNet(nn.Module):
     def __init__(self,
