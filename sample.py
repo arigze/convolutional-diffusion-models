@@ -156,7 +156,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--is",  dest="ideal_score",             action="store_true", help="Sample IdealScoreMachine")
     parser.add_argument("--ls",  dest="local_score",             action="store_true", help="Sample LocalScoreMachine")
     parser.add_argument("--els", dest="equivariant_local_score", action="store_true", help="Sample EquivariantLocalScoreMachine")
-    parser.add_argument("--seed",         type=int, required=True,  help="Seed for shared initial noise")
+    parser.add_argument("--seeds",        type=int, nargs="+", required=True, help="One or more seeds (run as a single batch)")
     parser.add_argument("--machine-steps", type=int, default=20,     help="Sampling steps shared across all models and score machines (default: 20)")
     parser.add_argument("--ddim-steps",   type=int, default=None,   help="DDIM sampling steps for neural models; overrides --machine-steps if set")
     return parser.parse_args()
@@ -171,17 +171,19 @@ def main() -> None:
         else "cpu"
     )
     print(f"Device : {device}")
-    print(f"Dataset: {args.dataset}  |  Seed: {args.seed}")
+    print(f"Dataset: {args.dataset}  |  Seeds: {args.seeds}")
 
     info = DATASET_INFO[args.dataset]
     channels   = info["channels"]
     image_size = info["image_size"]
 
-    # Shared initial noise [C, H, W] — same starting point for every sampler
-    torch.manual_seed(args.seed)
-    x0 = torch.randn(channels, image_size, image_size)
-
-    out_dir = Path("samples") / "comparisons" / str(args.seed)
+    # One starting noise per seed, stacked into a batch [B, C, H, W]
+    noises = []
+    for seed in args.seeds:
+        torch.manual_seed(seed)
+        noises.append(torch.randn(channels, image_size, image_size))
+    x0_batch = torch.stack(noises)   # [B, C, H, W]
+    B = len(args.seeds)
 
     # ------------------------------------------------------------------
     # Neural DDIM models (UNet / ResNet)
@@ -191,11 +193,13 @@ def main() -> None:
             continue
         print(f"\n[{model_type.upper()} {model_id}]")
         model = load_ddim(args.dataset, model_type, model_id, device)
-        x_in = x0.unsqueeze(0).to(device)  # [1, C, H, W]
+        x_in = x0_batch.to(device)   # [B, C, H, W]
         ddim_steps = args.ddim_steps if args.ddim_steps is not None else args.machine_steps
         with torch.no_grad():
-            sample = model.sample(batch_size=1, x=x_in, nsteps=ddim_steps, device=device)
-        save_sample(sample.squeeze(0).cpu(), out_dir, f"{model_type}_{model_id}")
+            samples = model.sample(batch_size=B, x=x_in, nsteps=ddim_steps, device=device)
+        for i, seed in enumerate(args.seeds):
+            save_sample(samples[i].cpu(), Path("samples") / "comparisons" / str(seed),
+                        f"{model_type}_{model_id}")
 
     # ------------------------------------------------------------------
     # Score machines (non-parametric, need the full dataset)
@@ -217,10 +221,12 @@ def main() -> None:
             print(f"\n[{name}]")
             sm = SMClass(ddim_derived_beta_schedule, dataset, 256, args.machine_steps)
             with torch.no_grad():
-                sample = sm.sample(x0.clone(), device=device)
-            save_sample(sample.cpu(), out_dir, name)
+                samples = sm.sample(x0_batch.clone(), device=device)  # [B, C, H, W]
+            for i, seed in enumerate(args.seeds):
+                save_sample(samples[i].cpu(), Path("samples") / "comparisons" / str(seed), name)
 
-    print(f"\nAll outputs saved to: {out_dir}/")
+    out_dirs = [Path("samples") / "comparisons" / str(s) for s in args.seeds]
+    print(f"\nAll outputs saved to: {', '.join(str(d) for d in out_dirs)}")
 
 
 if __name__ == "__main__":
