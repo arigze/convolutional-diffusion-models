@@ -136,7 +136,7 @@ def build_dataloader(cfg: FullConfig, *, data_root: str, num_workers: int) -> tu
 def build_model(cfg: FullConfig) -> DDIM:
     """Build backbone + wrap in DDIM, matching train_script_original behaviour."""
     mult = getattr(cfg.model, "mult", 1)
-    layers = getattr(cfg.model, "layers", 3)
+    layers = getattr(cfg.model, "num_mid_layers", getattr(cfg.model, "layers", 6))
     padding_mode = cfg.model.padding
 
     if cfg.model.architecture == "unet":
