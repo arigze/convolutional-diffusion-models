@@ -157,8 +157,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ls",  dest="local_score",             action="store_true", help="Sample LocalScoreMachine")
     parser.add_argument("--els", dest="equivariant_local_score", action="store_true", help="Sample EquivariantLocalScoreMachine")
     parser.add_argument("--seeds",        type=int, nargs="+", required=True, help="One or more seeds (run as a single batch)")
-    parser.add_argument("--machine-steps", type=int, default=20,     help="Sampling steps shared across all models and score machines (default: 20)")
-    parser.add_argument("--ddim-steps",   type=int, default=None,   help="DDIM sampling steps for neural models; overrides --machine-steps if set")
+    parser.add_argument("--machine-steps", type=int, default=20, help="Sampling steps for score machines (default: 20)")
+    parser.add_argument("--ddim-steps",   type=int, default=20, help="Sampling steps for DDIM neural models (default: 20)")
     return parser.parse_args()
 
 
@@ -194,7 +194,7 @@ def main() -> None:
         print(f"\n[{model_type.upper()} {model_id}]")
         model = load_ddim(args.dataset, model_type, model_id, device)
         x_in = x0_batch.to(device)   # [B, C, H, W]
-        ddim_steps = args.ddim_steps if args.ddim_steps is not None else args.machine_steps
+        ddim_steps = args.ddim_steps
         label = None
         if model.backbone.conditional:
             num_classes = model.backbone.embedding.class_embeddings.num_embeddings
