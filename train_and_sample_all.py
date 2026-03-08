@@ -28,9 +28,9 @@ CHECKPOINTS_ROOT = Path("artifacts/checkpoints")
 
 TRAIN_CONFIGS = [
     # "configs/mnist_unet.yaml",
-    "configs/mnist_resnet.yaml",
-    "configs/cifar10_unet.yaml",
-    "configs/cifar10_resnet.yaml",
+    # "configs/mnist_resnet.yaml",
+    # "configs/cifar10_unet.yaml",
+    # "configs/cifar10_resnet.yaml",
 ]
 
 SEED_BATCHES = [
@@ -100,7 +100,7 @@ def main() -> None:
     print("PHASE 1: TRAINING")
     print("=" * 70)
     for config in TRAIN_CONFIGS:
-        run([sys.executable, "train.py", "--config", config, "--num-workers", 4])
+        run([sys.executable, "train.py", "--config", config, "--num-workers", "4"])
 
     # ── Phase 2: discover ─────────────────────────────────────────────────── #
     print("\n" + "=" * 70)
