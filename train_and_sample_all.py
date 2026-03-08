@@ -20,7 +20,6 @@ from __future__ import annotations
 import subprocess
 import sys
 from collections import defaultdict
-from itertools import zip_longest
 from pathlib import Path
 
 
@@ -76,20 +75,26 @@ def discover_checkpoints() -> list[dict]:
 
 def generate_for_dataset(dataset: str, unet_ids: list[str], resnet_ids: list[str]) -> None:
     """
-    Pair up unet and resnet IDs (None-padded when counts differ) and run
-    sample.py for each pair, for both seed batches.
+    Run score machines once per dataset (independent of neural models),
+    then run each neural model separately, for each seed batch.
     """
-    for unet_id, resnet_id in zip_longest(unet_ids, resnet_ids):
-        for seeds in SEED_BATCHES:
-            cmd = [sys.executable, "sample.py", "--dataset", dataset]
-            if unet_id is not None:
-                cmd += ["--unet-id", unet_id]
-            if resnet_id is not None:
-                cmd += ["--resnet-id", resnet_id]
-            cmd += ["--is", "--ls", "--els"]
-            cmd += ["--seeds"] + [str(s) for s in seeds]
-            cmd += ["--machine-steps", "20"]
-            run(cmd)
+    # Score machines: one call per seed batch, no neural model IDs
+    for seeds in SEED_BATCHES:
+        cmd = [sys.executable, "sample.py", "--dataset", dataset]
+        cmd += ["--is", "--ls", "--els"]
+        cmd += ["--seeds"] + [str(s) for s in seeds]
+        cmd += ["--machine-steps", "20"]
+        run(cmd)
+
+    # Neural models: one call per model per seed batch
+    for model_type, model_ids in [("unet", unet_ids), ("resnet", resnet_ids)]:
+        for model_id in model_ids:
+            for seeds in SEED_BATCHES:
+                cmd = [sys.executable, "sample.py", "--dataset", dataset]
+                cmd += [f"--{model_type}-id", model_id]
+                cmd += ["--seeds"] + [str(s) for s in seeds]
+                cmd += ["--machine-steps", "20"]
+                run(cmd)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
