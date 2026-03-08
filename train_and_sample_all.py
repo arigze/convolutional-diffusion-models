@@ -27,15 +27,14 @@ from pathlib import Path
 CHECKPOINTS_ROOT = Path("artifacts/checkpoints")
 
 TRAIN_CONFIGS = [
-    #"configs/mnist_unet.yaml",
+    # "configs/mnist_unet.yaml",
     "configs/mnist_resnet.yaml",
     "configs/cifar10_unet.yaml",
     "configs/cifar10_resnet.yaml",
 ]
 
 SEED_BATCHES = [
-    [1, 2, 3, 4, 5],
-    [6, 7, 8, 9, 10],
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
 ]
 
 
@@ -89,6 +88,7 @@ def generate_for_dataset(dataset: str, unet_ids: list[str], resnet_ids: list[str
                 cmd += ["--resnet-id", resnet_id]
             cmd += ["--is", "--ls", "--els"]
             cmd += ["--seeds"] + [str(s) for s in seeds]
+            cmd += ["--machine-steps", "20"]
             run(cmd)
 
 
