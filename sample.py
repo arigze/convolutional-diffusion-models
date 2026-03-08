@@ -195,8 +195,18 @@ def main() -> None:
         model = load_ddim(args.dataset, model_type, model_id, device)
         x_in = x0_batch.to(device)   # [B, C, H, W]
         ddim_steps = args.ddim_steps if args.ddim_steps is not None else args.machine_steps
+        label = None
+        if model.backbone.conditional:
+            num_classes = model.backbone.embedding.class_embeddings.num_embeddings
+            labels = []
+            for seed in args.seeds:
+                g = torch.Generator()
+                g.manual_seed(seed)
+                labels.append(torch.randint(0, num_classes, (1,), generator=g).item())
+            label = torch.tensor(labels, device=device)
+            print(f"  Conditional model: labels {label.tolist()}")
         with torch.no_grad():
-            samples = model.sample(batch_size=B, x=x_in, nsteps=ddim_steps, device=device)
+            samples = model.sample(batch_size=B, x=x_in, nsteps=ddim_steps, device=device, label=label)
         for i, seed in enumerate(args.seeds):
             save_sample(samples[i].cpu(), Path("samples") / "comparisons" / str(seed),
                         f"{model_type}_{model_id}")
