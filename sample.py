@@ -209,7 +209,7 @@ def main() -> None:
             samples = model.sample(batch_size=B, x=x_in, nsteps=ddim_steps, device=device, label=label)
         for i, seed in enumerate(args.seeds):
             save_sample(samples[i].cpu(), Path("samples") / "comparisons" / str(seed),
-                        f"{model_type}_{model_id}")
+                        f"{args.dataset}_{model_type}_{model_id}")
 
     # ------------------------------------------------------------------
     # Score machines (non-parametric, need the full dataset)
@@ -233,7 +233,7 @@ def main() -> None:
             with torch.no_grad():
                 samples = sm.sample(x0_batch.clone(), device=device)  # [B, C, H, W]
             for i, seed in enumerate(args.seeds):
-                save_sample(samples[i].cpu(), Path("samples") / "comparisons" / str(seed), name)
+                save_sample(samples[i].cpu(), Path("samples") / "comparisons" / str(seed), f"{args.dataset}_{name}")
 
     out_dirs = [Path("samples") / "comparisons" / str(s) for s in args.seeds]
     print(f"\nAll outputs saved to: {', '.join(str(d) for d in out_dirs)}")
