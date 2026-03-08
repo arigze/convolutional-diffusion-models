@@ -77,7 +77,8 @@ class IdealScoreMachine(nn.Module):
             mu_t, sigma_t = self.mu[t].to(device), self.sigma[t].to(device)
             mu_prev, sigma_prev = self.mu[max(t - 1, 0)].to(device), self.sigma[max(t - 1, 0)].to(device)
 
-            x = (mu_prev / mu_t) * (x + (sigma_t**2 - (mu_t**2 / mu_prev**2) * sigma_prev**2) * score)
+            x_0_pred = (x + sigma_t**2 * score) / mu_t
+            x = mu_prev * x_0_pred + sigma_prev * (x - mu_t * x_0_pred) / sigma_t
 
         return x.squeeze(0)  # Remove batch dimension
 
@@ -162,7 +163,8 @@ class LocalScoreMachine(nn.Module):
             mu_t, sigma_t = self.mu[t].to(device), self.sigma[t].to(device)
             mu_prev, sigma_prev = self.mu[max(t - 1, 0)].to(device), self.sigma[max(t - 1, 0)].to(device)
 
-            x = (mu_prev / mu_t) * (x + (sigma_t**2 - (mu_t**2 / mu_prev**2) * sigma_prev**2) * score)
+            x_0_pred = (x + sigma_t**2 * score) / mu_t
+            x = mu_prev * x_0_pred + sigma_prev * (x - mu_t * x_0_pred) / sigma_t
 
         return x.squeeze(0)  # Remove batch dimension
 
@@ -260,6 +262,7 @@ class EquivariantLocalScoreMachine(nn.Module):
             mu_t, sigma_t = self.mu[t].to(device), self.sigma[t].to(device)
             mu_prev, sigma_prev = self.mu[max(t - 1, 0)].to(device), self.sigma[max(t - 1, 0)].to(device)
 
-            x = (mu_prev / mu_t) * (x + (sigma_t**2 - (mu_t**2 / mu_prev**2) * sigma_prev**2) * score)
+            x_0_pred = (x + sigma_t**2 * score) / mu_t
+            x = mu_prev * x_0_pred + sigma_prev * (x - mu_t * x_0_pred) / sigma_t
 
         return x.squeeze(0)  # Remove batch dimension

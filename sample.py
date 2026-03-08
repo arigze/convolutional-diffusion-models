@@ -38,13 +38,20 @@ CHECKPOINTS_ROOT = Path("artifacts/checkpoints")
 
 
 # ---------------------------------------------------------------------------
-# Noise schedule for score machines (discrete, cosine-derived)
+# Noise schedule for score machines (derived from DDIM's cosine alpha_bar)
 # ---------------------------------------------------------------------------
 
-def discrete_cosine_schedule(timesteps: int) -> torch.Tensor:
-    """Returns a tensor of `timesteps` beta values using the cosine schedule."""
-    t = torch.linspace(0.0, 1.0, timesteps)
-    return 1.0 - torch.cos(t / 1.008 * math.pi / 2.0) ** 2
+def ddim_derived_beta_schedule(timesteps: int) -> torch.Tensor:
+    """Per-step betas derived from DDIM's cosine alpha_bar curve.
+
+    Evaluates DDIM's alpha_bar = cos²(t·π/2 / 1.008) at T+1 equally-spaced
+    points, then derives per-step betas as beta[t] = 1 - alpha_bar[t] / alpha_bar[t-1].
+    This makes the score machine operate in the same noise space as DDIM.
+    """
+    t = torch.linspace(0.0, 1.0, timesteps + 1)
+    alpha_bar = torch.cos(t / 1.008 * math.pi / 2.0) ** 2
+    betas = 1.0 - alpha_bar[1:] / alpha_bar[:-1]
+    return betas.clamp(max=0.999)
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +215,7 @@ def main() -> None:
 
         for name, SMClass in score_machines:
             print(f"\n[{name}]")
-            sm = SMClass(discrete_cosine_schedule, dataset, 256, args.machine_steps)
+            sm = SMClass(ddim_derived_beta_schedule, dataset, 256, args.machine_steps)
             with torch.no_grad():
                 sample = sm.sample(x0.clone(), device=device)
             save_sample(sample.cpu(), out_dir, name)
